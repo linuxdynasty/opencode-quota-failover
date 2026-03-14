@@ -1,0 +1,23 @@
+CLAUDE.md
+  3605ae75bb230312 1-118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.12",
+  "base_commit_sha": "815f80b79c9df79db8505ca9bd34c27a510dbe97",
+  "prompts": {
+    "3605ae75bb230312": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-836dd312-745b-4c63-b0f2-ee4e3590fcdd",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 118,
+      "total_deletions": 0,
+      "accepted_lines": 118,
+      "overriden_lines": 0
+    }
+  }
+}
