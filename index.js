@@ -74,6 +74,9 @@ const providerHealth = new Map();
 const MAX_CONSECUTIVE_DISPATCH_FAILURES = 3;
 const DISPATCH_COOLDOWN_MS = 5 * 60 * 1000;
 
+const bounceCountBySession = new Map();
+const MAX_BOUNCE_COUNT = 3;
+
 const failoverEventLog = [];
 const FAILOVER_LOG_MAX_ENTRIES = 100;
 const FAILOVER_LOG_FILE_NAME = "failover.log";
@@ -139,6 +142,8 @@ function resetRuntimeSettings() {
   lastGlobalFailoverAt = 0;
   lastGlobalFailoverSession = null;
   failoverEventLog.length = 0;
+  providerHealth.clear();
+  bounceCountBySession.clear();
 }
 
 function logPathForRuntime() {
@@ -695,6 +700,9 @@ function pickFallback(failedModel, attemptedSet, modelTierHint) {
     if (attemptedSet.has(candidateKey)) {
       continue;
     }
+    if (isProviderInCooldown(candidate.providerID)) {
+      continue;
+    }
     return candidate;
   }
 
@@ -827,6 +835,7 @@ function cleanupSession(sessionID) {
   lastTransitionBySession.delete(sessionID);
   infoShownBySession.delete(sessionID);
   debugToastsShownBySession.delete(sessionID);
+  bounceCountBySession.delete(sessionID);
 }
 
 function consumeDebugToastBudget(sessionID) {
@@ -882,6 +891,96 @@ function summarizeDispatchError(err) {
     }
   }
   return summarizeText(parts.join(" · "), 140);
+}
+
+function extractResponseBodyReason(responseBody) {
+  if (typeof responseBody !== "string") {
+    return "";
+  }
+
+  const trimmed = responseBody.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    const parsedMessage =
+      parsed?.error?.message ??
+      parsed?.message ??
+      parsed?.error_description ??
+      parsed?.detail;
+    if (typeof parsedMessage === "string" && parsedMessage.trim()) {
+      return parsedMessage.trim();
+    }
+  } catch {}
+
+  return trimmed;
+}
+
+function exactDispatchErrorReason(err) {
+  if (!err) {
+    return "unknown error";
+  }
+
+  if (typeof err === "string") {
+    return summarizeText(err, 480);
+  }
+
+  const status =
+    err.statusCode ?? err.status ?? err.data?.statusCode ?? err.error?.status;
+  const rawCandidates = [
+    typeof err.data?.message === "string" ? err.data.message : "",
+    typeof err.message === "string" ? err.message : "",
+    typeof err.error?.message === "string" ? err.error.message : "",
+    typeof err.data?.error === "string" ? err.data.error : "",
+    extractResponseBodyReason(err.data?.responseBody),
+    typeof err.code === "string" ? `code=${err.code}` : "",
+  ];
+
+  const normalized = [];
+  for (const candidate of rawCandidates) {
+    const text = candidate?.trim();
+    if (!text) {
+      continue;
+    }
+    if (normalized.includes(text)) {
+      continue;
+    }
+    normalized.push(text);
+  }
+
+  let reason = normalized[0] ?? "unknown error";
+  if (Number.isFinite(status)) {
+    reason = `${status} ${reason}`;
+  }
+
+  return summarizeText(reason, 480);
+}
+
+function dispatchErrorHint(providerID, category) {
+  if (providerID === "openai") {
+    if (category === "auth_config") {
+      return "OpenAI authentication/config issue. ChatGPT account login is not OpenAI API auth here. Use a valid OpenAI API key/token with billing enabled (opencode auth login openai).";
+    }
+    if (category === "quota") {
+      return "OpenAI API quota/billing appears exhausted for the configured API key.";
+    }
+  }
+
+  if (category === "auth_config") {
+    return "Provider authentication/config failed. Verify provider login and model availability in OpenCode.";
+  }
+
+  if (category === "quota") {
+    return "Provider quota/billing appears exhausted for the configured credentials.";
+  }
+
+  if (category === "transient") {
+    return "Provider appears temporarily unavailable/rate-limited.";
+  }
+
+  return "Unknown provider error. Check provider logs and credentials.";
 }
 
 function classifyDispatchError(err) {
@@ -1085,7 +1184,7 @@ async function showDebugTriggerToast(ctx, sessionID, source, note) {
     return;
   }
 
-  const noteText = summarizeText(note);
+  const noteText = summarizeText(note, 220);
   const suffix = noteText ? ` · ${noteText}` : "";
 
   await ctx.client.tui
@@ -1103,6 +1202,29 @@ async function showDebugTriggerToast(ctx, sessionID, source, note) {
 async function processFailover(ctx, sessionID) {
   const pending = pendingBySession.get(sessionID);
   if (!pending) {
+    return;
+  }
+
+  // Bug 3: Bounce-back detection — stop after MAX_BOUNCE_COUNT cycles
+  const bounceCount = (bounceCountBySession.get(sessionID) ?? 0) + 1;
+  bounceCountBySession.set(sessionID, bounceCount);
+  if (bounceCount > MAX_BOUNCE_COUNT) {
+    pendingBySession.delete(sessionID);
+    clearStallWatchdog(sessionID);
+    await logFailoverEvent("BOUNCE_LIMIT", sessionID, {
+      bounces: bounceCount,
+      chain: providerChainSummary(),
+    });
+    await ctx.client.tui
+      .showToast({
+        body: {
+          title: "Model Failover",
+          message: `Stopped: failover bounced ${bounceCount} times between providers. All providers may be at quota.`,
+          variant: "error",
+          duration: 6000,
+        },
+      })
+      .catch(() => {});
     return;
   }
 
@@ -1257,6 +1379,9 @@ async function processFailover(ctx, sessionID) {
       return;
     } catch (dispatchErr) {
       const errDetail = summarizeDispatchError(dispatchErr);
+      const errReason = exactDispatchErrorReason(dispatchErr);
+      const errCategory = classifyDispatchError(dispatchErr);
+      const hint = dispatchErrorHint(target.providerID, errCategory);
       console.error(
         `[opencode-quota-failover] dispatch to ${formatModel(target)} failed: ${errDetail}`,
       );
@@ -1264,23 +1389,29 @@ async function processFailover(ctx, sessionID) {
       await logFailoverEvent("DISPATCH_ERROR", sessionID, {
         target: formatModel(target),
         tier: tierHint,
-        error: errDetail,
+        error: errReason,
+        category: errCategory,
       });
 
       await showDebugTriggerToast(
         ctx,
         sessionID,
         "failover.dispatch_error",
-        `${formatModel(target)}: ${errDetail}`,
+        `${formatModel(target)}: ${errReason}`,
       );
 
       await ctx.client.tui
         .showToast({
           body: {
             title: "Failover Dispatch Error",
-            message: `${formatModel(target)} failed:\n${errDetail}`,
+            message: [
+              `${formatModel(target)} failed`,
+              `Reason: ${errReason}`,
+              `Category: ${errCategory}`,
+              `Hint: ${hint}`,
+            ].join("\n"),
             variant: "error",
-            duration: 6000,
+            duration: 9000,
           },
         })
         .catch(() => {});
@@ -1423,6 +1554,9 @@ async function runManualFailover(
     });
   } catch (dispatchErr) {
     const errDetail = summarizeDispatchError(dispatchErr);
+    const errReason = exactDispatchErrorReason(dispatchErr);
+    const errCategory = classifyDispatchError(dispatchErr);
+    const hint = dispatchErrorHint(target.providerID, errCategory);
     console.error(
       `[opencode-quota-failover] manual dispatch to ${formatModel(target)} failed: ${errDetail}`,
     );
@@ -1430,14 +1564,17 @@ async function runManualFailover(
       source: "manual",
       target: formatModel(target),
       tier: tierHint,
-      error: errDetail,
+      error: errReason,
+      category: errCategory,
     });
     attemptedSet.delete(targetKey);
     return [
       `Failed to dispatch failover to ${formatModel(target)}.`,
-      `Error: ${errDetail}`,
+      `Reason: ${errReason}`,
+      `Category: ${errCategory}`,
+      `Hint: ${hint}`,
       "",
-      "Check that the provider is configured in OpenCode and the API key is valid.",
+      "Check provider auth in OpenCode and ensure the selected model is available.",
     ].join("\n");
   }
 
@@ -1967,6 +2104,11 @@ export default async function quotaFailoverPlugin(ctx) {
             clearStallWatchdog(info.sessionID);
           }
 
+          if (!info.error && safeNumber(info.tokens?.output) > 0) {
+            bounceCountBySession.delete(info.sessionID);
+            recordProviderDispatchSuccess(info.providerID);
+          }
+
           const failedModel = {
             providerID: info.providerID,
             modelID: info.modelID,
@@ -1983,6 +2125,7 @@ export default async function quotaFailoverPlugin(ctx) {
           if (isWithinGlobalCooldown(info.sessionID)) {
             return;
           }
+          recordProviderDispatchFailure(info.providerID, "quota");
           const forceOpusTier =
             isBedrockOpusModel(failedModel) &&
             isThinkingBlockMutationError(info.error);
@@ -2054,6 +2197,9 @@ export default async function quotaFailoverPlugin(ctx) {
             return;
           }
 
+          if (failedModel?.providerID) {
+            recordProviderDispatchFailure(failedModel.providerID, "quota");
+          }
           const forceOpusTier =
             isBedrockOpusModel(failedModel) &&
             isThinkingBlockMutationError(retryMessage);
@@ -2101,6 +2247,9 @@ export default async function quotaFailoverPlugin(ctx) {
 
           if (isWithinGlobalCooldown(sessionID)) {
             return;
+          }
+          if (failedModel?.providerID) {
+            recordProviderDispatchFailure(failedModel.providerID, "quota");
           }
           const forceOpusTier =
             isBedrockOpusModel(failedModel) &&

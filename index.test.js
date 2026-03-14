@@ -2209,7 +2209,7 @@ describe("opencode-quota-failover", () => {
       const result = await hooks.tool.failover_now.execute({}, makeToolContext(sessionID));
 
       expect(result).toContain("404 Model gpt-5.3-codex not found");
-      expect(result).toContain("Check that the provider");
+      expect(result).toContain("Check provider auth in OpenCode");
     });
 
     test("summarizeDispatchError extracts status and message from nested error shapes", async () => {
@@ -2327,6 +2327,52 @@ describe("opencode-quota-failover", () => {
       expect(debugToast).toBeDefined();
       const msg = debugToast.body.message;
       expect(msg.includes("quota exceeded") || msg.includes("insufficient_quota")).toBe(true);
+    });
+
+    test("openai dispatch failure toast includes exact reason and actionable auth hint", async () => {
+      const sessionID = "s-openai-auth-hint";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-openai-auth-hint",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+      const { ctx, toastCalls } = createContextWithFailingPrompt(messagesBySession, {
+        failProviders: ["openai"],
+        errorMessage: "403 Forbidden: account not authorized for this organization"
+      });
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.tool.failover_set_providers.execute(
+        { providers: ["openai", "amazon-bedrock"] },
+        makeToolContext(sessionID)
+      );
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      const errorToast = toastCalls.find((c) => c?.body?.title === "Failover Dispatch Error");
+      expect(errorToast).toBeDefined();
+      expect(errorToast.body.message).toContain("Reason: 403 Forbidden: account not authorized for this organization");
+      expect(errorToast.body.message).toContain("Category: auth_config");
+      expect(errorToast.body.message).toContain("ChatGPT account login is not OpenAI API auth here");
+
+      await hooks.tool.failover_set_providers.execute(
+        { providers: ["amazon-bedrock", "openai"] },
+        makeToolContext(sessionID)
+      );
     });
   });
 
