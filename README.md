@@ -4,7 +4,7 @@ Automatic AI provider failover for OpenCode — when your quota runs out, your s
 
 [![CI](https://github.com/linuxdynasty/opencode-quota-failover/actions/workflows/test.yml/badge.svg)](https://github.com/linuxdynasty/opencode-quota-failover/actions/workflows/test.yml)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-green.svg)
+![Version](https://img.shields.io/badge/version-2.0.0-green.svg)
 
 ---
 
@@ -116,7 +116,7 @@ See [docs/architecture.md](./docs/architecture.md) for a full module map and Mer
 |---|---|---|
 | Anthropic | `anthropic` | claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5 |
 | Amazon Bedrock | `amazon-bedrock` | us.anthropic.claude-opus-4-6-v1, us.anthropic.claude-sonnet-4-6, moonshotai.kimi-k2.5 |
-| OpenAI | `openai` | gpt-5.3-codex, gpt-5.2-codex |
+| OpenAI | `openai` | gpt-5.4, gpt-5.3-codex, gpt-5.2-codex |
 
 ---
 
@@ -142,8 +142,8 @@ The file is created with defaults on first run. You can edit it directly or use 
       "haiku": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     },
     "openai": {
-      "opus": "gpt-5.3-codex",
-      "sonnet": "gpt-5.2-codex",
+      "opus": "gpt-5.4",
+      "sonnet": "gpt-5.3-codex",
       "haiku": "gpt-5.2-codex"
     },
     "anthropic": {
@@ -176,7 +176,7 @@ The file is created with defaults on first run. You can edit it directly or use 
 
 ## MCP tools
 
-The plugin exposes six MCP tools for direct control and inspection. See [docs/mcp-tools.md](./docs/mcp-tools.md) for the full reference with argument schemas and example outputs.
+The plugin exposes seven MCP tools for direct control and inspection. See [docs/mcp-tools.md](./docs/mcp-tools.md) for the full reference with argument schemas and example outputs.
 
 **`failover_status`**
 
@@ -235,6 +235,19 @@ List available failover models and the active tier mappings.
 ```
 Arguments:
   provider  string  (optional) Filter by provider ID
+```
+
+**`failover_add_model`**
+
+Register a new model at runtime without editing code. The model is added to the in-memory catalog and optionally set as the default for its provider/tier.
+
+```
+Arguments:
+  provider       string   Provider ID (anthropic | amazon-bedrock | openai)
+  modelID        string   Model ID to register
+  tier           string   Tier: opus | sonnet | haiku
+  isDefault      boolean  (optional) Set as default for this provider/tier
+  contextWindow  number   (optional) Token context window size
 ```
 
 ---
