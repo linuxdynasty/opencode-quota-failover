@@ -1,0 +1,23 @@
+tsconfig.json
+  fbce0378393b7739 1-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "bc98dbf931cb5f90cd34a9b8a9ae52497dc73ff4",
+  "prompts": {
+    "fbce0378393b7739": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_3160f8041ffeRY6lsojJ0Sjqbq-417ef420-551f-4a03-9174-a37ade880fcf",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 23,
+      "total_deletions": 0,
+      "accepted_lines": 23,
+      "overriden_lines": 0
+    }
+  }
+}
