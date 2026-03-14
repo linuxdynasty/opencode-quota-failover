@@ -310,7 +310,7 @@ function collectErrorDetails(error) {
   return { text: texts.join(" "), statusCode };
 }
 
-function isUsageLimitError(error) {
+function isDefinitiveQuotaError(error) {
   const { text, statusCode } = collectErrorDetails(error);
   if (!text) {
     return false;
@@ -349,10 +349,6 @@ function isUsageLimitError(error) {
     return true;
   }
 
-  if (/(would exceed your account'?s rate limit|account'?s rate limit)/.test(text)) {
-    return true;
-  }
-
   if (statusCode === 402) {
     const billingWords = /(payment|billing|quota|credit|subscription|plan)/;
     if (billingWords.test(text)) {
@@ -367,6 +363,36 @@ function isUsageLimitError(error) {
   }
 
   return false;
+}
+
+function isAmbiguousRateLimitSignal(error) {
+  const { text } = collectErrorDetails(error);
+  if (!text) {
+    return false;
+  }
+
+  const tokenLimitSignals = [
+    "context length",
+    "context window",
+    "token limit",
+    "too many tokens",
+    "prompt is too long",
+    "max_tokens",
+    "context_length_exceeded"
+  ];
+  if (tokenLimitSignals.some((signal) => text.includes(signal))) {
+    return false;
+  }
+
+  if (/(would exceed your account'?s rate limit|account'?s rate limit)/.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
+function isUsageLimitError(error) {
+  return isDefinitiveQuotaError(error) || isAmbiguousRateLimitSignal(error);
 }
 
 function isBedrockOpusModel(model) {
@@ -398,8 +424,11 @@ function isThinkingBlockMutationError(error) {
   return hits >= 2;
 }
 
-function shouldTriggerFailover(error, failedModel) {
-  if (isUsageLimitError(error)) {
+function shouldTriggerFailover(error, failedModel, { requireDefinitive = false } = {}) {
+  const isQuota = requireDefinitive
+    ? isDefinitiveQuotaError(error)
+    : isUsageLimitError(error);
+  if (isQuota) {
     return true;
   }
 
@@ -1185,7 +1214,7 @@ function buildStatusReport(sessionID) {
   return lines.join("\n");
 }
 
-export { isUsageLimitError };
+export { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal };
 
 export default async function quotaFailoverPlugin(ctx) {
   resetRuntimeSettings();
@@ -1430,7 +1459,7 @@ export default async function quotaFailoverPlugin(ctx) {
             providerID: info.providerID,
             modelID: info.modelID
           };
-          if (!info.error || !shouldTriggerFailover(info.error, failedModel)) {
+          if (!info.error || !shouldTriggerFailover(info.error, failedModel, { requireDefinitive: true })) {
             return;
           }
 
@@ -1509,7 +1538,7 @@ export default async function quotaFailoverPlugin(ctx) {
           const failedModel = (lastAssistant?.providerID && lastAssistant?.modelID)
             ? { providerID: lastAssistant.providerID, modelID: lastAssistant.modelID }
             : null;
-          if (!sessionID || !error || !shouldTriggerFailover(error, failedModel)) {
+          if (!sessionID || !error || !shouldTriggerFailover(error, failedModel, { requireDefinitive: true })) {
             return;
           }
 

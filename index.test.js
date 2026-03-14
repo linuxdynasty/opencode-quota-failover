@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import quotaFailoverPlugin, { isUsageLimitError } from "./index.js";
+import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal } from "./index.js";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -1764,6 +1764,238 @@ describe("opencode-quota-failover", () => {
       expect(isUsageLimitError({
         data: { message: "Rate limit reached. Please retry in 1 minute. Limit: 100 RPM", statusCode: 429 }
       })).toBe(false);
+    });
+  });
+
+  describe("isDefinitiveQuotaError - hard quota only", () => {
+    test.each([
+      ["insufficient_quota"],
+      ["You exceeded your current quota, please check your plan and billing details."],
+      ["quota exceeded for this billing period"],
+      ["billing hard limit reached"],
+      ["out of credits"],
+      ["insufficient credits for this request"],
+      ["servicequotaexceeded"],
+      ["you have reached your usage limit"],
+      ["monthly usage limit exceeded"],
+      ["daily usage limit reached"],
+      ["your subscription limit has been reached"],
+      ["plan limit reached"],
+      ["usage limit exceeded for your account"],
+    ])("returns true for definitive quota: %s", (message) => {
+      expect(isDefinitiveQuotaError({ message })).toBe(true);
+    });
+
+    test("returns true for HTTP 402 + billing language", () => {
+      expect(isDefinitiveQuotaError({
+        data: { message: "Payment required: upgrade your billing plan", statusCode: 402 }
+      })).toBe(true);
+    });
+
+    test("returns true for long backoff + account words in error text", () => {
+      expect(isDefinitiveQuotaError({
+        message: "This request would exceed your account's rate limit. Please try again later. [retrying in 1h 39m]"
+      })).toBe(true);
+    });
+
+    test("returns false for 'account rate limit' WITHOUT long backoff in text", () => {
+      expect(isDefinitiveQuotaError({
+        message: "This request would exceed your account's rate limit. Please try again later."
+      })).toBe(false);
+    });
+
+    test("returns false for transient rate limit", () => {
+      expect(isDefinitiveQuotaError({ message: "rate limit exceeded, retry in 30 seconds" })).toBe(false);
+    });
+
+    test("returns false for generic too many requests", () => {
+      expect(isDefinitiveQuotaError({ message: "too many requests" })).toBe(false);
+    });
+
+    test("returns false for context length errors", () => {
+      expect(isDefinitiveQuotaError({ message: "context length exceeded" })).toBe(false);
+    });
+
+    test("returns false for server overloaded", () => {
+      expect(isDefinitiveQuotaError({ message: "overloaded_error: temporarily unable to process" })).toBe(false);
+    });
+  });
+
+  describe("isAmbiguousRateLimitSignal - deferred to session.status", () => {
+    test("returns true for 'would exceed account rate limit'", () => {
+      expect(isAmbiguousRateLimitSignal({
+        message: "This request would exceed your account's rate limit. Please try again later."
+      })).toBe(true);
+    });
+
+    test("returns true for 'accounts rate limit' without apostrophe", () => {
+      expect(isAmbiguousRateLimitSignal({
+        message: "accounts rate limit exceeded"
+      })).toBe(true);
+    });
+
+    test("returns false for generic rate limit without account qualifier", () => {
+      expect(isAmbiguousRateLimitSignal({ message: "rate limit exceeded" })).toBe(false);
+    });
+
+    test("returns false for hard quota patterns", () => {
+      expect(isAmbiguousRateLimitSignal({ message: "insufficient_quota" })).toBe(false);
+    });
+
+    test("returns false for context length errors", () => {
+      expect(isAmbiguousRateLimitSignal({ message: "context length exceeded" })).toBe(false);
+    });
+
+    test("returns false for too many requests", () => {
+      expect(isAmbiguousRateLimitSignal({ message: "too many requests" })).toBe(false);
+    });
+  });
+
+  test("message.updated does NOT trigger failover for ambiguous 'account rate limit' without backoff", async () => {
+    const sessionID = "s-no-false-positive";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-no-false-positive",
+          agent: "sisyphus",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-6"
+        }),
+        makeAssistantErrorMessage(
+          sessionID,
+          "anthropic",
+          "claude-opus-4-6",
+          "This request would exceed your account's rate limit. Please try again later.",
+          429
+        )
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: messagesBySession[sessionID][1].info }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(0);
+  });
+
+  test("session.error does NOT trigger failover for ambiguous 'account rate limit' without backoff", async () => {
+    const sessionID = "s-error-no-false-positive";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-error-no-fp",
+          agent: "sisyphus",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-6"
+        }),
+        makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "noop", 200)
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: {
+            sessionID, role: "assistant",
+            providerID: "anthropic", modelID: "claude-opus-4-6",
+            tokens: { input: 1000, output: 0 }
+          }
+        }
+      }
+    });
+
+    await hooks.event({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID,
+          error: { message: "This request would exceed your account's rate limit. Please try again later." }
+        }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(0);
+  });
+
+  test("message.updated STILL triggers immediately for definitive quota (insufficient_quota)", async () => {
+    const sessionID = "s-definitive-still-works";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-definitive",
+          agent: "sisyphus",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-6"
+        }),
+        makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: messagesBySession[sessionID][1].info }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+  });
+
+  test("message.updated STILL triggers when 'account rate limit' includes long backoff in error text", async () => {
+    const sessionID = "s-account-rl-long-backoff-text";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-rl-long-backoff-text",
+          agent: "sisyphus",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-6"
+        }),
+        makeAssistantErrorMessage(
+          sessionID,
+          "anthropic",
+          "claude-opus-4-6",
+          "This request would exceed your account's rate limit. Please try again later. [retrying in 1h 39m]",
+          429
+        )
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: messagesBySession[sessionID][1].info }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.model).toEqual({
+      providerID: "amazon-bedrock",
+      modelID: "us.anthropic.claude-opus-4-6-v1"
     });
   });
 
