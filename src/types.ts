@@ -60,14 +60,10 @@ export interface ErrorDetails {
 
 /** PendingFailover holds the queued failover payload awaiting a dispatch-safe event. */
 export interface PendingFailover {
-  /** Target provider/model selected for the upcoming dispatch. */
-  target: ProviderModel;
-  /** Tier used while choosing fallback targets. */
-  tier: KnownTier | null;
+  /** Tier hint used to select the fallback target during dispatch. */
+  modelTierHint?: KnownTier | string | null;
   /** Provider/model that failed and triggered this failover. */
-  failedModel: ProviderModel;
-  /** Trigger source identifier (e.g. event name or detector). */
-  triggeredBy: string;
+  failedModel?: ProviderModel | null;
   /** Epoch milliseconds when failover was queued. */
   queuedAt: number;
 }
@@ -79,19 +75,23 @@ export interface AssistantStats {
   /** Model used in the latest assistant response. */
   modelID: string;
   /** Prompt/input token count. */
-  inputTokens: number;
+  inputTokens: number | undefined;
   /** Completion/output token count. */
-  outputTokens: number;
+  outputTokens: number | undefined;
+  /** Reasoning/thinking token count, if available. */
+  reasoningTokens: number | undefined;
+  /** Epoch milliseconds when snapshot was recorded. */
+  at: number;
 }
 
 /** TransitionRecord documents a completed provider/model transition during failover. */
 export interface TransitionRecord {
   /** Previous model before failover dispatch. */
-  from: ProviderModel;
+  from: ProviderModel | null;
   /** Selected model after failover dispatch. */
   to: ProviderModel;
-  /** Tier used while selecting the fallback target. */
-  tier: KnownTier | null;
+  /** Tier hint used while selecting the fallback target. */
+  tierHint: KnownTier | string | null;
   /** Epoch milliseconds when transition happened. */
   at: number;
 }
@@ -100,8 +100,8 @@ export interface TransitionRecord {
 export interface TriggerRecord {
   /** Trigger source name (event path, detector, watchdog, etc). */
   source: string;
-  /** Short normalized trigger context text. */
-  text: string;
+  /** Short normalized trigger note text. */
+  note: string;
   /** Epoch milliseconds when trigger was recorded. */
   at: number;
 }
@@ -112,32 +112,34 @@ export interface ProviderHealthRecord {
   consecutiveFailures: number;
   /** Timestamp of most recent failure. */
   lastFailureAt: number;
-  /** Most recent failure reason summary. */
-  lastError: string;
+  /** Most recent failure error category (auth_config, quota, transient, unknown), or null. */
+  lastErrorCategory: string | null;
 }
 
 /** RetryStatusRecord holds the most recent retry backoff details observed for a session. */
 export interface RetryStatusRecord {
+  /** Retry attempt number from the session.status event. */
+  attempt: unknown;
+  /** Next retry timestamp from the session.status event. */
+  nextAt: unknown;
+  /** Source message text from the retry status event. */
+  message: unknown;
   /** Parsed retry delay in milliseconds. */
   retryBackoffMs: number;
-  /** Timestamp when retry status was observed. */
-  receivedAt: number;
-  /** Source text where retry info came from. */
-  text: string;
 }
 
 /** StallWatchdogEntry represents an active stall watchdog timer registration for a session. */
 export interface StallWatchdogEntry {
-  /** Timer handle used to cancel watchdog dispatch. */
-  timer: ReturnType<typeof setTimeout>;
   /** Selected fallback target guarded by this timer. */
   target: ProviderModel;
-  /** Tier context for fallback continuity. */
-  tier: KnownTier | null;
-  /** Failed model that originally triggered queueing. */
-  failedModel: ProviderModel;
-  /** Trigger source captured when watchdog was armed. */
-  triggeredBy: string;
+  /** Tier hint used when arming the watchdog. */
+  tierHint: string | null;
+  /** Epoch milliseconds when watchdog was armed. */
+  startedAt: number;
+  /** Timeout duration in milliseconds. */
+  timeoutMs: number;
+  /** Timer handle used to cancel watchdog dispatch. */
+  timer: ReturnType<typeof setTimeout>;
 }
 
 /** PersistedSettings defines the on-disk settings.json payload shape with all fields optional. */

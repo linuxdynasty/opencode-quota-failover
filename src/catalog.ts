@@ -121,7 +121,7 @@ export const MODEL_CATALOG: readonly ModelDefinition[] = [
     isDefault: false,
     tierPatterns: ['codex-mini', 'gpt-5.1-codex', 'gpt-5.1'],
     notes:
-      'Configured as haiku in catalog; current inferTierFromModel ordering may classify it as sonnet due substring overlap.',
+      'Configured as haiku in catalog; current inferTierFromModel ordering may classify it as sonnet due to substring overlap.',
   },
   {
     id: 'gpt-5-codex',
