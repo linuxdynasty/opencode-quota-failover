@@ -1,6 +1,6 @@
 {
   "name": "opencode-quota-failover",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "OpenCode plugin that automatically detects AI provider quota exhaustion and seamlessly fails over to a fallback provider.",
   "type": "module",
   "main": "index.js",
