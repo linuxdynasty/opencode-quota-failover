@@ -1,6 +1,39 @@
 {
   "name": "opencode-quota-failover",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that automatically detects AI provider quota exhaustion and seamlessly fails over to a fallback provider.",
   "type": "module",
-  "main": "index.js"
+  "main": "index.js",
+  "license": "MIT",
+  "author": "Allen Sanabria <asanabria6910@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linuxdynasty/opencode-quota-failover.git"
+  },
+  "bugs": {
+    "url": "https://github.com/linuxdynasty/opencode-quota-failover/issues"
+  },
+  "homepage": "https://github.com/linuxdynasty/opencode-quota-failover#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "quota",
+    "failover",
+    "rate-limit",
+    "anthropic",
+    "claude",
+    "bedrock",
+    "openai",
+    "multi-provider",
+    "ai"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  }
 }
