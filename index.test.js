@@ -2635,4 +2635,546 @@ describe("opencode-quota-failover", () => {
     });
   });
 
+  describe("Cooldown boundary and edge cases", () => {
+    test("cross-session failover is blocked at 59,999ms within cooldown window", async () => {
+      const sessionA = "cooldown-boundary-a";
+      const sessionB = "cooldown-boundary-b";
+      const messagesBySession = {
+        [sessionA]: [
+          makeUserMessage(sessionA, { id: "u-boundary-a", agent: "sisyphus", providerID: "anthropic", modelID: "claude-opus-4-6" }),
+          makeAssistantErrorMessage(sessionA, "anthropic", "claude-opus-4-6", "insufficient_quota", 429, "a-boundary-a")
+        ],
+        [sessionB]: [
+          makeUserMessage(sessionB, { id: "u-boundary-b", agent: "sisyphus", providerID: "anthropic", modelID: "claude-opus-4-6" }),
+          makeAssistantErrorMessage(sessionB, "anthropic", "claude-opus-4-6", "insufficient_quota", 429, "a-boundary-b")
+        ]
+      };
+      const { ctx, promptCalls } = createContext(messagesBySession);
+
+      const realNow = Date.now;
+      let now = 1_700_000_000_000;
+      Date.now = () => now;
+      try {
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionA][1].info } } });
+        await hooks.event({ event: { type: "session.idle", properties: { sessionID: sessionA } } });
+
+        now += 59_999;
+
+        await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionB][1].info } } });
+        await hooks.event({ event: { type: "session.idle", properties: { sessionID: sessionB } } });
+      } finally {
+        Date.now = realNow;
+      }
+
+      expect(promptCalls).toHaveLength(1);
+      expect(promptCalls[0].path.id).toBe(sessionA);
+    });
+
+    test("cross-session failover is allowed after cooldown expiry at 60,001ms", async () => {
+      const sessionA = "cooldown-expiry-a";
+      const sessionB = "cooldown-expiry-b";
+      const messagesBySession = {
+        [sessionA]: [
+          makeUserMessage(sessionA, { id: "u-expiry-a", agent: "sisyphus", providerID: "anthropic", modelID: "claude-opus-4-6" }),
+          makeAssistantErrorMessage(sessionA, "anthropic", "claude-opus-4-6", "insufficient_quota", 429, "a-expiry-a")
+        ],
+        [sessionB]: [
+          makeUserMessage(sessionB, { id: "u-expiry-b", agent: "sisyphus", providerID: "anthropic", modelID: "claude-opus-4-6" }),
+          makeAssistantErrorMessage(sessionB, "anthropic", "claude-opus-4-6", "insufficient_quota", 429, "a-expiry-b")
+        ]
+      };
+      const { ctx, promptCalls } = createContext(messagesBySession);
+
+      const realNow = Date.now;
+      let now = 1_700_000_100_000;
+      Date.now = () => now;
+      try {
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionA][1].info } } });
+        await hooks.event({ event: { type: "session.idle", properties: { sessionID: sessionA } } });
+
+        now += 60_001;
+
+        await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionB][1].info } } });
+        await hooks.event({ event: { type: "session.idle", properties: { sessionID: sessionB } } });
+      } finally {
+        Date.now = realNow;
+      }
+
+      expect(promptCalls).toHaveLength(2);
+      expect(promptCalls[0].path.id).toBe(sessionA);
+      expect(promptCalls[1].path.id).toBe(sessionB);
+    });
+
+    test("same-session exemption allows cascading tier transitions during cooldown", async () => {
+      const sessionID = "cooldown-cascade";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-cascade",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-sonnet-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-sonnet-4-6", "insufficient_quota", 429, "a-cascade-1")
+        ]
+      };
+      const { ctx, promptCalls } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionID][1].info } } });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: {
+            info: makeAssistantErrorMessage(
+              sessionID,
+              "amazon-bedrock",
+              "us.anthropic.claude-sonnet-4-6",
+              "insufficient_quota",
+              429,
+              "a-cascade-2"
+            ).info
+          }
+        }
+      });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      expect(promptCalls).toHaveLength(2);
+      expect(promptCalls[0].body.model).toEqual({
+        providerID: "amazon-bedrock",
+        modelID: "us.anthropic.claude-sonnet-4-6"
+      });
+      expect(promptCalls[1].body.model).toEqual({
+        providerID: "openai",
+        modelID: "gpt-5.3-codex"
+      });
+    });
+
+    test("session.deleted clears state and allows fresh failover for same session ID", async () => {
+      const sessionID = "deleted-cleanup";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-cleanup",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota", 429, "a-cleanup-1")
+        ]
+      };
+      const { ctx, promptCalls } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionID][1].info } } });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      await hooks.event({ event: { type: "session.deleted", properties: { info: { id: sessionID } } } });
+
+      messagesBySession[sessionID] = [
+        makeUserMessage(sessionID, {
+          id: "u-cleanup",
+          agent: "sisyphus",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-6"
+        }),
+        makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota", 429, "a-cleanup-2")
+      ];
+
+      await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionID][1].info } } });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      expect(promptCalls).toHaveLength(2);
+      expect(promptCalls[0].body.model.providerID).toBe("amazon-bedrock");
+      expect(promptCalls[1].body.model.providerID).toBe("amazon-bedrock");
+    });
+
+    test("duplicate session.idle events are idempotent and dispatch only once", async () => {
+      const sessionID = "idle-idempotent";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, { id: "u-idle-idempotent", providerID: "anthropic", modelID: "claude-opus-4-6" }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+      const { ctx, promptCalls } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionID][1].info } } });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      expect(promptCalls).toHaveLength(1);
+    });
+  });
+
+  describe("session.error and chain exhaustion", () => {
+    test("session.error with definitive quota error queues failover and dispatches on idle", async () => {
+      const sessionID = "session-error-definitive";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-session-error-definitive",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          })
+        ]
+      };
+      const { ctx, promptCalls } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: {
+            info: {
+              id: "a-stats-definitive",
+              sessionID,
+              role: "assistant",
+              providerID: "anthropic",
+              modelID: "claude-opus-4-6",
+              tokens: { input: 1000, output: 0, reasoning: 0 }
+            }
+          }
+        }
+      });
+
+      await hooks.event({
+        event: {
+          type: "session.error",
+          properties: {
+            sessionID,
+            error: { message: "insufficient_quota" }
+          }
+        }
+      });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      expect(promptCalls).toHaveLength(1);
+      expect(promptCalls[0].body.model).toEqual({
+        providerID: "amazon-bedrock",
+        modelID: "us.anthropic.claude-opus-4-6-v1"
+      });
+    });
+
+    test("session.error with ambiguous account rate limit does not queue failover", async () => {
+      const sessionID = "session-error-ambiguous";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-session-error-ambiguous",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          })
+        ]
+      };
+      const { ctx, promptCalls } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: {
+            info: {
+              id: "a-stats-ambiguous",
+              sessionID,
+              role: "assistant",
+              providerID: "anthropic",
+              modelID: "claude-opus-4-6",
+              tokens: { input: 2000, output: 0 }
+            }
+          }
+        }
+      });
+
+      await hooks.event({
+        event: {
+          type: "session.error",
+          properties: {
+            sessionID,
+            error: { message: "This request would exceed your account's rate limit. Please try again later." }
+          }
+        }
+      });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      expect(promptCalls).toHaveLength(0);
+    });
+
+    test("haiku tier mapping is preserved from anthropic to bedrock", async () => {
+      const sessionID = "haiku-tier-preserved";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-haiku-tier-preserved",
+            providerID: "anthropic",
+            modelID: "claude-haiku-4-5"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-haiku-4-5", "insufficient_quota")
+        ]
+      };
+      const { ctx, promptCalls } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionID][1].info } } });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      expect(promptCalls).toHaveLength(1);
+      expect(promptCalls[0].body.model).toEqual({
+        providerID: "amazon-bedrock",
+        modelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      });
+    });
+
+    test("chain exhaustion shows no-additional-fallback toast without dispatch", async () => {
+      const sessionID = "chain-exhaustion-no-fallback";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-chain-exhaustion",
+            providerID: "amazon-bedrock",
+            modelID: "us.anthropic.claude-opus-4-6-v1"
+          }),
+          makeAssistantErrorMessage(sessionID, "amazon-bedrock", "us.anthropic.claude-opus-4-6-v1", "insufficient_quota")
+        ]
+      };
+      const { ctx, promptCalls, toastCalls } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.tool.failover_set_providers.execute({ providers: ["amazon-bedrock"] }, makeToolContext(sessionID));
+      await hooks.event({ event: { type: "message.updated", properties: { info: messagesBySession[sessionID][1].info } } });
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+      expect(promptCalls).toHaveLength(0);
+      const toast = toastCalls.find((call) =>
+        call?.body?.title === "Model Failover" &&
+        typeof call?.body?.message === "string" &&
+        call.body.message.includes("No additional fallback model available")
+      );
+      expect(toast).toBeDefined();
+    });
+
+    test("missing settings file loads defaults gracefully", async () => {
+      rmSync(TEST_SETTINGS_PATH, { force: true });
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const status = await hooks.tool.failover_status.execute({ sessionID: "" }, makeToolContext(""));
+      expect(status).toContain("Provider chain: amazon-bedrock -> openai");
+      expect(status).toContain("Debug toasts: on");
+    });
+
+    test("corrupt settings JSON loads defaults without crashing", async () => {
+      writeFileSync(TEST_SETTINGS_PATH, "{ not valid json");
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const status = await hooks.tool.failover_status.execute({ sessionID: "" }, makeToolContext(""));
+      expect(status).toContain("Provider chain: amazon-bedrock -> openai");
+    });
+
+    test("unknown provider entries are filtered from provider chain", async () => {
+      writeFileSync(
+        TEST_SETTINGS_PATH,
+        JSON.stringify(
+          {
+            providerChain: ["amazon-bedrock", "fake-provider", "openai"],
+            modelByProviderAndTier: {
+              "amazon-bedrock": {
+                opus: "us.anthropic.claude-opus-4-6-v1",
+                sonnet: "us.anthropic.claude-sonnet-4-6",
+                haiku: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+              },
+              openai: {
+                opus: "gpt-5.4",
+                sonnet: "gpt-5.3-codex",
+                haiku: "gpt-5.2-codex"
+              },
+              anthropic: {
+                opus: "claude-opus-4-6",
+                sonnet: "claude-sonnet-4-6",
+                haiku: "claude-haiku-4-5"
+              }
+            },
+            debugToasts: true
+          },
+          null,
+          2
+        )
+      );
+
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+      const status = await hooks.tool.failover_status.execute({ sessionID: "" }, makeToolContext(""));
+
+      expect(status).toContain("Provider chain: amazon-bedrock -> openai");
+      expect(status).not.toContain("fake-provider");
+    });
+
+    test("empty provider chain in settings keeps default provider chain", async () => {
+      writeFileSync(
+        TEST_SETTINGS_PATH,
+        JSON.stringify(
+          {
+            providerChain: [],
+            debugToasts: false,
+            globalCooldownMs: 60_000
+          },
+          null,
+          2
+        )
+      );
+
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+      const status = await hooks.tool.failover_status.execute({ sessionID: "" }, makeToolContext(""));
+
+      expect(status).toContain("Provider chain: amazon-bedrock -> openai");
+    });
+  });
+
+  describe("MCP tool edge cases", () => {
+    test("failover_set_providers with all invalid providers returns an error", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const result = await hooks.tool.failover_set_providers.execute(
+        { providers: ["fake1", "fake2"] },
+        makeToolContext("tool-invalid-providers")
+      );
+
+      expect(result).toContain("No valid providers supplied");
+    });
+
+    test("failover_set_providers deduplicates provider entries before persisting", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const result = await hooks.tool.failover_set_providers.execute(
+        { providers: ["openai", "openai", "amazon-bedrock"] },
+        makeToolContext("tool-dedupe-providers")
+      );
+
+      expect(result).toContain("openai -> amazon-bedrock");
+
+      const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
+      expect(saved.providerChain).toEqual(["openai", "amazon-bedrock"]);
+    });
+
+    test("failover_set_model with allTiers=true sets all tiers for provider", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const result = await hooks.tool.failover_set_model.execute(
+        {
+          provider: "openai",
+          modelID: "gpt-5.3-codex",
+          allTiers: true
+        },
+        makeToolContext("tool-set-model-all-tiers")
+      );
+
+      expect(result).toContain("Updated tiers: opus, sonnet, haiku");
+
+      const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
+      expect(saved.modelByProviderAndTier.openai.opus).toBe("gpt-5.3-codex");
+      expect(saved.modelByProviderAndTier.openai.sonnet).toBe("gpt-5.3-codex");
+      expect(saved.modelByProviderAndTier.openai.haiku).toBe("gpt-5.3-codex");
+    });
+
+    test("failover_set_model with unknown model returns error", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const result = await hooks.tool.failover_set_model.execute(
+        {
+          provider: "openai",
+          modelID: "gpt-5.999-unknown",
+          tier: "sonnet"
+        },
+        makeToolContext("tool-unknown-model")
+      );
+
+      expect(result).toContain("Unknown model for provider openai");
+    });
+
+    test("failover_set_debug toggles enabled state in status report", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.tool.failover_set_debug.execute({ enabled: true }, makeToolContext("tool-debug-enable"));
+      const statusEnabled = await hooks.tool.failover_status.execute({ sessionID: "" }, makeToolContext(""));
+      expect(statusEnabled).toContain("Debug toasts: on");
+
+      await hooks.tool.failover_set_debug.execute({ enabled: false }, makeToolContext("tool-debug-disable"));
+      const statusDisabled = await hooks.tool.failover_status.execute({ sessionID: "" }, makeToolContext(""));
+      expect(statusDisabled).toContain("Debug toasts: off");
+    });
+
+    test("failover_list_models without filter reports all providers", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const report = await hooks.tool.failover_list_models.execute({}, makeToolContext("tool-list-models-all"));
+      expect(report).toContain("Provider: amazon-bedrock");
+      expect(report).toContain("Provider: openai");
+      expect(report).toContain("Provider: anthropic");
+    });
+
+    test("failover_list_models with provider filter returns only requested provider", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const report = await hooks.tool.failover_list_models.execute(
+        { provider: "openai" },
+        makeToolContext("tool-list-models-openai")
+      );
+
+      expect(report).toContain("Provider: openai");
+      expect(report).not.toContain("Provider: amazon-bedrock");
+      expect(report).not.toContain("Provider: anthropic");
+    });
+
+    test("failover_status with no active session returns non-error summary", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const report = await hooks.tool.failover_status.execute({ sessionID: "" }, makeToolContext(""));
+      expect(report).toContain("Quota Failover Status");
+      expect(report).toContain("Session: none selected");
+      expect(report).toContain("Quota window note:");
+    });
+
+    test("failover_now with no replayable session context returns informative error", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const result = await hooks.tool.failover_now.execute({}, makeToolContext("tool-failover-now-empty"));
+      expect(result).toContain("Unable to run failover-now: no user message found to replay.");
+    });
+
+    test("failover_set_model persists selected mapping to settings.json", async () => {
+      const { ctx } = createContext({});
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.tool.failover_set_model.execute(
+        {
+          provider: "amazon-bedrock",
+          modelID: "moonshot.kimi-k2-thinking",
+          tier: "sonnet"
+        },
+        makeToolContext("tool-persist-model")
+      );
+
+      const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
+      expect(saved.modelByProviderAndTier["amazon-bedrock"].sonnet).toBe("moonshot.kimi-k2-thinking");
+    });
+  });
+
 });
