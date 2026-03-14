@@ -10,8 +10,8 @@
       "haiku": "us.anthropic.claude-sonnet-4-6"
     },
     "openai": {
-      "opus": "gpt-5.3-codex",
-      "sonnet": "gpt-5.2-codex",
+      "opus": "gpt-5.4",
+      "sonnet": "gpt-5.3-codex",
       "haiku": "gpt-5.2-codex"
     },
     "anthropic": {
@@ -22,8 +22,5 @@
   },
   "debugToasts": true,
   "stallWatchdogMs": 45000,
-  "stallWatchdogEnabled": false,
-  "globalCooldownMs": 60000,
-  "minRetryBackoffMs": 1800000,
-  "updatedAt": "2026-02-26T21:33:34Z"
+  "updatedAt": "2026-03-14T14:17:18.961Z"
 }

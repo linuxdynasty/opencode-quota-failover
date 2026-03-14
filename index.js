@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -7,33 +7,41 @@ const DEFAULT_TIER = null;
 const BEDROCK_MODEL_BY_TIER = {
   opus: "us.anthropic.claude-opus-4-6-v1",
   sonnet: "us.anthropic.claude-sonnet-4-6",
-  haiku: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+  haiku: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 };
 const OPENAI_MODEL_BY_TIER = {
-  opus: "gpt-5.3-codex",
-  sonnet: "gpt-5.2-codex",
-  haiku: "gpt-5.2-codex"
+  opus: "gpt-5.4",
+  sonnet: "gpt-5.3-codex",
+  haiku: "gpt-5.2-codex",
 };
 const ANTHROPIC_MODEL_BY_TIER = {
   opus: "claude-opus-4-6",
   sonnet: "claude-sonnet-4-6",
-  haiku: "claude-haiku-4-5"
+  haiku: "claude-haiku-4-5",
 };
 const BEDROCK_AVAILABLE_MODELS = [
   "us.anthropic.claude-opus-4-6-v1",
   "us.anthropic.claude-sonnet-4-6",
   "us.anthropic.claude-haiku-4-5-20251001-v1:0",
   "moonshotai.kimi-k2.5",
-  "moonshot.kimi-k2-thinking"
+  "moonshot.kimi-k2-thinking",
 ];
 const OPENAI_AVAILABLE_MODELS = [
+  "gpt-5.4",
   "gpt-5.3-codex",
-  "gpt-5.2-codex"
+  "gpt-5.3-codex-spark",
+  "gpt-5.2",
+  "gpt-5.2-codex",
+  "gpt-5.1-codex-max",
+  "gpt-5.1-codex",
+  "gpt-5.1-codex-mini",
+  "gpt-5-codex",
+  "codex-mini-latest",
 ];
 const ANTHROPIC_AVAILABLE_MODELS = [
   "claude-opus-4-6",
   "claude-sonnet-4-6",
-  "claude-haiku-4-5"
+  "claude-haiku-4-5",
 ];
 const DEFAULT_PROVIDER_CHAIN = ["amazon-bedrock", "openai"];
 const KNOWN_PROVIDER_IDS = ["amazon-bedrock", "openai", "anthropic"];
@@ -41,12 +49,12 @@ const KNOWN_TIERS = ["opus", "sonnet", "haiku"];
 const DEFAULT_MODEL_BY_PROVIDER_AND_TIER = {
   "amazon-bedrock": BEDROCK_MODEL_BY_TIER,
   openai: OPENAI_MODEL_BY_TIER,
-  anthropic: ANTHROPIC_MODEL_BY_TIER
+  anthropic: ANTHROPIC_MODEL_BY_TIER,
 };
 const AVAILABLE_MODEL_IDS_BY_PROVIDER = {
   "amazon-bedrock": BEDROCK_AVAILABLE_MODELS,
   openai: OPENAI_AVAILABLE_MODELS,
-  anthropic: ANTHROPIC_AVAILABLE_MODELS
+  anthropic: ANTHROPIC_AVAILABLE_MODELS,
 };
 
 const pendingBySession = new Map();
@@ -62,6 +70,14 @@ const stallWatchdogBySession = new Map();
 let lastGlobalFailoverAt = 0;
 let lastGlobalFailoverSession = null;
 
+const providerHealth = new Map();
+const MAX_CONSECUTIVE_DISPATCH_FAILURES = 3;
+const DISPATCH_COOLDOWN_MS = 5 * 60 * 1000;
+
+const failoverEventLog = [];
+const FAILOVER_LOG_MAX_ENTRIES = 100;
+const FAILOVER_LOG_FILE_NAME = "failover.log";
+
 function cloneProviderTierMatrix(matrix) {
   const clone = {};
   for (const providerID of Object.keys(matrix ?? {})) {
@@ -73,11 +89,13 @@ function cloneProviderTierMatrix(matrix) {
 const runtimeSettings = {
   debugToasts: true,
   providerChain: [...DEFAULT_PROVIDER_CHAIN],
-  modelByProviderAndTier: cloneProviderTierMatrix(DEFAULT_MODEL_BY_PROVIDER_AND_TIER),
+  modelByProviderAndTier: cloneProviderTierMatrix(
+    DEFAULT_MODEL_BY_PROVIDER_AND_TIER,
+  ),
   stallWatchdogMs: 45 * 1000,
   stallWatchdogEnabled: false,
   globalCooldownMs: 60 * 1000,
-  minRetryBackoffMs: 30 * 60 * 1000
+  minRetryBackoffMs: 30 * 60 * 1000,
 };
 
 const SYSTEM_PROMPT_PREFIX = "[opencode-quota-failover]";
@@ -90,7 +108,7 @@ const FAILOVER_COMMAND_PREFIXES = [
   "/failover-providers",
   "/failover-models",
   "/failover-set-model",
-  "/failover-debug"
+  "/failover-debug",
 ];
 
 function settingsPathForRuntime() {
@@ -98,19 +116,59 @@ function settingsPathForRuntime() {
   if (override) {
     return override;
   }
-  return join(homedir(), ".config", "opencode", "plugins", "opencode-quota-failover", SETTINGS_FILE_NAME);
+  return join(
+    homedir(),
+    ".config",
+    "opencode",
+    "plugins",
+    "opencode-quota-failover",
+    SETTINGS_FILE_NAME,
+  );
 }
 
 function resetRuntimeSettings() {
   runtimeSettings.debugToasts = true;
   runtimeSettings.providerChain = [...DEFAULT_PROVIDER_CHAIN];
-  runtimeSettings.modelByProviderAndTier = cloneProviderTierMatrix(DEFAULT_MODEL_BY_PROVIDER_AND_TIER);
+  runtimeSettings.modelByProviderAndTier = cloneProviderTierMatrix(
+    DEFAULT_MODEL_BY_PROVIDER_AND_TIER,
+  );
   runtimeSettings.stallWatchdogMs = 45 * 1000;
   runtimeSettings.stallWatchdogEnabled = false;
   runtimeSettings.globalCooldownMs = 60 * 1000;
   runtimeSettings.minRetryBackoffMs = 30 * 60 * 1000;
   lastGlobalFailoverAt = 0;
   lastGlobalFailoverSession = null;
+  failoverEventLog.length = 0;
+}
+
+function logPathForRuntime() {
+  const settingsDir = dirname(settingsPathForRuntime());
+  return join(settingsDir, FAILOVER_LOG_FILE_NAME);
+}
+
+async function logFailoverEvent(level, sessionID, fields = {}) {
+  const timestamp = new Date().toISOString();
+  const sessionShort = sessionID ? sessionID.slice(0, 16) : "none";
+
+  const fieldParts = Object.entries(fields)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([k, v]) => {
+      const str = String(v);
+      return `${k}=${str.includes(" ") ? `"${str}"` : str}`;
+    });
+
+  const line = `${timestamp} [${level}] session=${sessionShort} ${fieldParts.join(" ")}`;
+
+  failoverEventLog.push(line);
+  if (failoverEventLog.length > FAILOVER_LOG_MAX_ENTRIES) {
+    failoverEventLog.shift();
+  }
+
+  try {
+    const logPath = logPathForRuntime();
+    await mkdir(dirname(logPath), { recursive: true });
+    await appendFile(logPath, line + "\n");
+  } catch {}
 }
 
 async function loadRuntimeSettings(path) {
@@ -122,8 +180,13 @@ async function loadRuntimeSettings(path) {
       runtimeSettings.providerChain = providerChain;
     }
 
-    if (parsed?.modelByProviderAndTier && typeof parsed.modelByProviderAndTier === "object") {
-      const merged = cloneProviderTierMatrix(DEFAULT_MODEL_BY_PROVIDER_AND_TIER);
+    if (
+      parsed?.modelByProviderAndTier &&
+      typeof parsed.modelByProviderAndTier === "object"
+    ) {
+      const merged = cloneProviderTierMatrix(
+        DEFAULT_MODEL_BY_PROVIDER_AND_TIER,
+      );
       for (const providerID of KNOWN_PROVIDER_IDS) {
         for (const tier of KNOWN_TIERS) {
           const candidate = parsed.modelByProviderAndTier?.[providerID]?.[tier];
@@ -141,7 +204,10 @@ async function loadRuntimeSettings(path) {
     }
 
     if (Number.isFinite(parsed?.stallWatchdogMs)) {
-      runtimeSettings.stallWatchdogMs = Math.max(1000, Math.round(parsed.stallWatchdogMs));
+      runtimeSettings.stallWatchdogMs = Math.max(
+        1000,
+        Math.round(parsed.stallWatchdogMs),
+      );
     }
 
     if (typeof parsed?.stallWatchdogEnabled === "boolean") {
@@ -149,11 +215,17 @@ async function loadRuntimeSettings(path) {
     }
 
     if (Number.isFinite(parsed?.globalCooldownMs)) {
-      runtimeSettings.globalCooldownMs = Math.max(0, Math.round(parsed.globalCooldownMs));
+      runtimeSettings.globalCooldownMs = Math.max(
+        0,
+        Math.round(parsed.globalCooldownMs),
+      );
     }
 
     if (Number.isFinite(parsed?.minRetryBackoffMs)) {
-      runtimeSettings.minRetryBackoffMs = Math.max(0, Math.round(parsed.minRetryBackoffMs));
+      runtimeSettings.minRetryBackoffMs = Math.max(
+        0,
+        Math.round(parsed.minRetryBackoffMs),
+      );
     }
   } catch {}
 }
@@ -167,7 +239,7 @@ async function saveRuntimeSettings(path) {
     stallWatchdogEnabled: runtimeSettings.stallWatchdogEnabled,
     globalCooldownMs: runtimeSettings.globalCooldownMs,
     minRetryBackoffMs: runtimeSettings.minRetryBackoffMs,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
   };
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(payload, null, 2));
@@ -213,15 +285,19 @@ function canonicalModelID(providerID, modelID) {
   }
 
   const available = availableModelsForProvider(providerID);
-  return available.find((candidate) => candidate.toLowerCase() === normalized) ?? null;
+  return (
+    available.find((candidate) => candidate.toLowerCase() === normalized) ??
+    null
+  );
 }
 
 function getModelForProviderTier(providerID, tier) {
   if (!tier) {
     return null;
   }
-  const providerModels = runtimeSettings.modelByProviderAndTier[providerID]
-    ?? DEFAULT_MODEL_BY_PROVIDER_AND_TIER[providerID];
+  const providerModels =
+    runtimeSettings.modelByProviderAndTier[providerID] ??
+    DEFAULT_MODEL_BY_PROVIDER_AND_TIER[providerID];
   if (!providerModels) {
     return null;
   }
@@ -229,9 +305,10 @@ function getModelForProviderTier(providerID, tier) {
 }
 
 function providerTierSummary(providerID) {
-  return KNOWN_TIERS
-    .map((tier) => `${tier}: ${providerID}/${getModelForProviderTier(providerID, tier) ?? "n/a"}`)
-    .join("\n");
+  return KNOWN_TIERS.map(
+    (tier) =>
+      `${tier}: ${providerID}/${getModelForProviderTier(providerID, tier) ?? "n/a"}`,
+  ).join("\n");
 }
 
 function buildModelCatalogReport(providerID) {
@@ -249,17 +326,18 @@ function buildModelCatalogReport(providerID) {
   }
 
   lines.push("");
-  lines.push("Tip: use failover_set_model to choose a provider/tier target model.");
+  lines.push(
+    "Tip: use failover_set_model to choose a provider/tier target model.",
+  );
   return lines.join("\n");
 }
 
 function fallbackSummaryByTier() {
-  return KNOWN_TIERS
-    .map((tier) => {
-      const chain = buildFallbackChain(tier).map(formatModel).join(" -> ") || "(none)";
-      return `${tier}: ${chain}`;
-    })
-    .join("\n");
+  return KNOWN_TIERS.map((tier) => {
+    const chain =
+      buildFallbackChain(tier).map(formatModel).join(" -> ") || "(none)";
+    return `${tier}: ${chain}`;
+  }).join("\n");
 }
 
 function collectErrorDetails(error) {
@@ -323,7 +401,7 @@ function isDefinitiveQuotaError(error) {
     "too many tokens",
     "prompt is too long",
     "max_tokens",
-    "context_length_exceeded"
+    "context_length_exceeded",
   ];
   if (tokenLimitSignals.some((signal) => text.includes(signal))) {
     return false;
@@ -343,7 +421,7 @@ function isDefinitiveQuotaError(error) {
     /daily usage limit/,
     /subscription.*limit.*(?:reached|exceeded)/,
     /plan.*limit.*(?:reached|exceeded)/,
-    /usage limit (?:reached|exceeded|hit)/
+    /usage limit (?:reached|exceeded|hit)/,
   ];
   if (hardQuotaPatterns.some((pattern) => pattern.test(text))) {
     return true;
@@ -357,7 +435,8 @@ function isDefinitiveQuotaError(error) {
   }
 
   const retryBackoffMs = parseRetryBackoffMs(text);
-  const hasAccountQuotaWords = /(account|quota|subscription|billing|plan limit|usage limit)/.test(text);
+  const hasAccountQuotaWords =
+    /(account|quota|subscription|billing|plan limit|usage limit)/.test(text);
   if (retryBackoffMs >= 30 * 60 * 1000 && hasAccountQuotaWords) {
     return true;
   }
@@ -378,13 +457,15 @@ function isAmbiguousRateLimitSignal(error) {
     "too many tokens",
     "prompt is too long",
     "max_tokens",
-    "context_length_exceeded"
+    "context_length_exceeded",
   ];
   if (tokenLimitSignals.some((signal) => text.includes(signal))) {
     return false;
   }
 
-  if (/(would exceed your account'?s rate limit|account'?s rate limit)/.test(text)) {
+  if (
+    /(would exceed your account'?s rate limit|account'?s rate limit)/.test(text)
+  ) {
     return true;
   }
 
@@ -411,7 +492,7 @@ function isThinkingBlockMutationError(error) {
     "the model returned the following errors",
     "thinking` or `redacted_thinking` blocks",
     "blocks in the latest assistant message cannot be modified",
-    "must remain as they were in the original response"
+    "must remain as they were in the original response",
   ];
 
   let hits = 0;
@@ -424,7 +505,11 @@ function isThinkingBlockMutationError(error) {
   return hits >= 2;
 }
 
-function shouldTriggerFailover(error, failedModel, { requireDefinitive = false } = {}) {
+function shouldTriggerFailover(
+  error,
+  failedModel,
+  { requireDefinitive = false } = {},
+) {
   const isQuota = requireDefinitive
     ? isDefinitiveQuotaError(error)
     : isUsageLimitError(error);
@@ -440,14 +525,18 @@ function parseRetryBackoffMs(text) {
     return 0;
   }
 
-  const marker = text.match(/(?:retry(?:ing)?|try again)\s+in\s+([^\]\n\.;,]+)/i);
+  const marker = text.match(
+    /(?:retry(?:ing)?|try again)\s+in\s+([^\]\n\.;,]+)/i,
+  );
   if (!marker?.[1]) {
     return 0;
   }
 
   const segment = marker[1];
   let totalMs = 0;
-  const unitMatches = segment.matchAll(/(\d+)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)\b/gi);
+  const unitMatches = segment.matchAll(
+    /(\d+)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)\b/gi,
+  );
   for (const match of unitMatches) {
     const amount = Number.parseInt(match[1] ?? "0", 10);
     const unit = (match[2] ?? "").toLowerCase();
@@ -481,7 +570,7 @@ function convertPartToInput(part) {
       text: part.text ?? "",
       synthetic: part.synthetic,
       ignored: part.ignored,
-      metadata: part.metadata
+      metadata: part.metadata,
     };
   }
 
@@ -491,7 +580,7 @@ function convertPartToInput(part) {
       mime: part.mime,
       filename: part.filename,
       url: part.url,
-      source: part.source
+      source: part.source,
     };
   }
 
@@ -499,7 +588,7 @@ function convertPartToInput(part) {
     return {
       type: "agent",
       name: part.name,
-      source: part.source
+      source: part.source,
     };
   }
 
@@ -508,7 +597,7 @@ function convertPartToInput(part) {
       type: "subtask",
       prompt: part.prompt,
       description: part.description,
-      agent: part.agent
+      agent: part.agent,
     };
   }
 
@@ -538,33 +627,34 @@ function inferTierFromModel(model) {
   }
 
   if (
-    modelID.includes("claude-opus-4-6")
-    || modelID.includes("claude-opus")
-    || modelID.includes("gpt-5.3")
-    || modelID.includes("gpt-5.3-codex")
-    || modelID.includes("gpt-5-codex")
-    || modelID.includes("gpt-5.1-codex-max")
+    modelID.includes("claude-opus-4-6") ||
+    modelID.includes("claude-opus") ||
+    modelID.includes("gpt-5.4") ||
+    modelID.includes("gpt-5-codex") ||
+    modelID.includes("gpt-5.1-codex-max")
   ) {
     return "opus";
   }
 
   if (
-    modelID.includes("claude-sonnet-4-6")
-    || modelID.includes("claude-sonnet")
-    || modelID.includes("gpt-5.2-codex")
-    || modelID.includes("gpt-5.3-codex-spark")
-    || modelID.includes("gpt-5.1-codex")
-    || modelID.includes("gpt-5.1")
-    || modelID.includes("kimi-k2.5")
-    || modelID.includes("kimi")
+    modelID.includes("claude-sonnet-4-6") ||
+    modelID.includes("claude-sonnet") ||
+    modelID.includes("gpt-5.3-codex") ||
+    modelID.includes("gpt-5.3-codex-spark") ||
+    modelID.includes("gpt-5.2-codex") ||
+    modelID.includes("gpt-5.2") ||
+    modelID.includes("gpt-5.1-codex") ||
+    modelID.includes("gpt-5.1") ||
+    modelID.includes("kimi-k2.5") ||
+    modelID.includes("kimi")
   ) {
     return "sonnet";
   }
 
   if (
-    modelID.includes("claude-haiku-4-5")
-    || modelID.includes("claude-haiku")
-    || modelID.includes("codex-mini")
+    modelID.includes("claude-haiku-4-5") ||
+    modelID.includes("claude-haiku") ||
+    modelID.includes("codex-mini")
   ) {
     return "haiku";
   }
@@ -619,7 +709,7 @@ function isWithinGlobalCooldown(sessionID) {
   if (sessionID && sessionID === lastGlobalFailoverSession) {
     return false;
   }
-  return (Date.now() - lastGlobalFailoverAt) < cooldownMs;
+  return Date.now() - lastGlobalFailoverAt < cooldownMs;
 }
 
 function queueFailover(sessionID, pending) {
@@ -627,7 +717,7 @@ function queueFailover(sessionID, pending) {
   pendingBySession.set(sessionID, {
     queuedAt: Date.now(),
     ...existing,
-    ...pending
+    ...pending,
   });
 }
 
@@ -642,19 +732,29 @@ function clearStallWatchdog(sessionID) {
 function resolveEventSessionID(event) {
   const props = event?.properties ?? {};
   return (
-    props.sessionID
-    ?? props.info?.sessionID
-    ?? props.message?.sessionID
-    ?? props.message?.info?.sessionID
-    ?? props.part?.sessionID
-    ?? props.part?.message?.sessionID
-    ?? null
+    props.sessionID ??
+    props.info?.sessionID ??
+    props.message?.sessionID ??
+    props.message?.info?.sessionID ??
+    props.part?.sessionID ??
+    props.part?.message?.sessionID ??
+    null
   );
 }
 
-async function handleStallWatchdogTimeout(ctx, sessionID, target, tierHint, startedAt) {
+async function handleStallWatchdogTimeout(
+  ctx,
+  sessionID,
+  target,
+  tierHint,
+  startedAt,
+) {
   const current = stallWatchdogBySession.get(sessionID);
-  if (!current || modelKey(current.target) !== modelKey(target) || current.startedAt !== startedAt) {
+  if (
+    !current ||
+    modelKey(current.target) !== modelKey(target) ||
+    current.startedAt !== startedAt
+  ) {
     return;
   }
   stallWatchdogBySession.delete(sessionID);
@@ -664,18 +764,20 @@ async function handleStallWatchdogTimeout(ctx, sessionID, target, tierHint, star
     ctx,
     sessionID,
     "watchdog.stall_timeout",
-    `${formatModel(target)} after ${elapsedMs}ms`
+    `${formatModel(target)} after ${elapsedMs}ms`,
   );
 
   queueFailover(sessionID, {
     modelTierHint: tierHint,
-    failedModel: target
+    failedModel: target,
   });
 
-  await ctx.client.session.abort({
-    path: { id: sessionID },
-    query: { directory: ctx.directory }
-  }).catch(() => {});
+  await ctx.client.session
+    .abort({
+      path: { id: sessionID },
+      query: { directory: ctx.directory },
+    })
+    .catch(() => {});
 
   await processFailover(ctx, sessionID);
 }
@@ -688,10 +790,20 @@ function armStallWatchdog(ctx, sessionID, target, tierHint) {
   clearStallWatchdog(sessionID);
 
   const startedAt = Date.now();
-  const timeoutMs = Math.max(1000, Number(runtimeSettings.stallWatchdogMs) || 45 * 1000);
+  const timeoutMs = Math.max(
+    1000,
+    Number(runtimeSettings.stallWatchdogMs) || 45 * 1000,
+  );
   const timer = setTimeout(
-    () => handleStallWatchdogTimeout(ctx, sessionID, target, tierHint, startedAt).catch(() => {}),
-    timeoutMs
+    () =>
+      handleStallWatchdogTimeout(
+        ctx,
+        sessionID,
+        target,
+        tierHint,
+        startedAt,
+      ).catch(() => {}),
+    timeoutMs,
   );
   timer.unref?.();
 
@@ -700,7 +812,7 @@ function armStallWatchdog(ctx, sessionID, target, tierHint) {
     tierHint,
     startedAt,
     timeoutMs,
-    timer
+    timer,
   });
 }
 
@@ -737,11 +849,139 @@ function summarizeText(value, max = 90) {
   return `${compact.slice(0, max - 1)}…`;
 }
 
+function summarizeDispatchError(err) {
+  if (!err) return "unknown error";
+  if (typeof err === "string") return summarizeText(err, 140);
+
+  const parts = [];
+
+  // Status code first (most diagnostic)
+  const status =
+    err.statusCode ?? err.status ?? err.data?.statusCode ?? err.error?.status;
+  if (Number.isFinite(status)) parts.push(`${status}`);
+
+  // Primary message
+  if (err.message) parts.push(err.message);
+
+  // Nested details from OpenCode SDK error shapes
+  if (err.data?.message && err.data.message !== err.message)
+    parts.push(err.data.message);
+  if (err.data?.responseBody && typeof err.data.responseBody === "string")
+    parts.push(err.data.responseBody);
+  if (err.data?.error && typeof err.data.error === "string")
+    parts.push(err.data.error);
+  if (err.error?.message && err.error.message !== err.message)
+    parts.push(err.error.message);
+  if (err.code && typeof err.code === "string") parts.push(`code=${err.code}`);
+
+  if (parts.length === 0) {
+    try {
+      return summarizeText(JSON.stringify(err), 140);
+    } catch {
+      return "unknown error";
+    }
+  }
+  return summarizeText(parts.join(" · "), 140);
+}
+
+function classifyDispatchError(err) {
+  if (!err) return "unknown";
+
+  const text = [
+    typeof err === "string" ? err : "",
+    err.message ?? "",
+    err.code ?? "",
+    typeof err.data?.message === "string" ? err.data.message : "",
+    typeof err.data?.responseBody === "string" ? err.data.responseBody : "",
+    typeof err.data?.error === "string" ? err.data.error : "",
+    typeof err.error?.message === "string" ? err.error.message : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  const status =
+    err.statusCode ?? err.status ?? err.data?.statusCode ?? err.error?.status;
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    /unauthorized|forbidden|invalid.?api.?key|invalid.?credentials|access.?denied/.test(
+      text,
+    ) ||
+    /authentication|not.?authorized/.test(text)
+  ) {
+    return "auth_config";
+  }
+
+  if (
+    status === 404 ||
+    /model.?not.?found|not.?found|does.?not.?exist|unknown.?model|unsupported.?model/.test(
+      text,
+    ) ||
+    /no.?such.?model|invalid.?model/.test(text)
+  ) {
+    return "auth_config";
+  }
+
+  if (
+    /insufficient.?quota|quota.?exceeded|billing.?hard.?limit|out.?of.?credits/.test(
+      text,
+    ) ||
+    status === 402
+  ) {
+    return "quota";
+  }
+
+  if (
+    status === 429 ||
+    status === 503 ||
+    status === 502 ||
+    status === 500 ||
+    /rate.?limit|too.?many.?requests|overloaded|temporarily.?unavailable|timeout|timed.?out/.test(
+      text,
+    ) ||
+    /econnreset|econnrefused|enotfound|socket.?hang.?up|network|fetch.?failed/.test(
+      text,
+    )
+  ) {
+    return "transient";
+  }
+
+  return "unknown";
+}
+
+function isProviderInCooldown(providerID) {
+  const health = providerHealth.get(providerID);
+  if (!health) return false;
+  if (health.consecutiveFailures < MAX_CONSECUTIVE_DISPATCH_FAILURES)
+    return false;
+  return Date.now() - health.lastFailureAt < DISPATCH_COOLDOWN_MS;
+}
+
+function recordProviderDispatchFailure(providerID, errorCategory) {
+  const existing = providerHealth.get(providerID) ?? {
+    consecutiveFailures: 0,
+    lastFailureAt: 0,
+    lastErrorCategory: null,
+  };
+  providerHealth.set(providerID, {
+    consecutiveFailures: existing.consecutiveFailures + 1,
+    lastFailureAt: Date.now(),
+    lastErrorCategory: errorCategory,
+  });
+}
+
+function recordProviderDispatchSuccess(providerID) {
+  providerHealth.delete(providerID);
+}
+
 function firstTextPart(message) {
   if (!message || !Array.isArray(message.parts)) {
     return "";
   }
-  const part = message.parts.find((entry) => entry?.type === "text" && typeof entry.text === "string");
+  const part = message.parts.find(
+    (entry) => entry?.type === "text" && typeof entry.text === "string",
+  );
   return part?.text ?? "";
 }
 
@@ -753,7 +993,8 @@ function isFailoverCommandMessage(message) {
 function pickReplayUserMessage(messages) {
   const ordered = [...(messages ?? [])].reverse();
   const nonCommandUser = ordered.find(
-    (message) => message.info?.role === "user" && !isFailoverCommandMessage(message)
+    (message) =>
+      message.info?.role === "user" && !isFailoverCommandMessage(message),
   );
   if (nonCommandUser) {
     return nonCommandUser;
@@ -768,7 +1009,7 @@ function recordTrigger(sessionID, source, note) {
   lastTriggerBySession.set(sessionID, {
     source,
     note: summarizeText(note, 160),
-    at: Date.now()
+    at: Date.now(),
   });
 }
 
@@ -810,18 +1051,22 @@ function estimateModelContextLimit(modelID) {
     return undefined;
   }
 
+  if (id.includes("gpt-5.4")) {
+    return 1050000;
+  }
+
   if (
-    id.includes("gpt-5.3")
-    || id.includes("gpt-5.2")
-    || id.includes("gpt-5.1-codex-max")
+    id.includes("gpt-5.3") ||
+    id.includes("gpt-5.2") ||
+    id.includes("gpt-5.1-codex-max")
   ) {
     return 272000;
   }
 
   if (
-    id.includes("claude-opus-4-6")
-    || id.includes("claude-sonnet-4-6")
-    || id.includes("claude-haiku-4-5")
+    id.includes("claude-opus-4-6") ||
+    id.includes("claude-sonnet-4-6") ||
+    id.includes("claude-haiku-4-5")
   ) {
     return 200000;
   }
@@ -832,21 +1077,27 @@ function estimateModelContextLimit(modelID) {
 async function showDebugTriggerToast(ctx, sessionID, source, note) {
   recordTrigger(sessionID, source, note);
 
-  if (!runtimeSettings.debugToasts || !sessionID || !consumeDebugToastBudget(sessionID)) {
+  if (
+    !runtimeSettings.debugToasts ||
+    !sessionID ||
+    !consumeDebugToastBudget(sessionID)
+  ) {
     return;
   }
 
   const noteText = summarizeText(note);
   const suffix = noteText ? ` · ${noteText}` : "";
 
-  await ctx.client.tui.showToast({
-    body: {
-      title: "Failover Debug",
-      message: `Trigger: ${source}${suffix}`,
-      variant: "info",
-      duration: 2600
-    }
-  }).catch(() => {});
+  await ctx.client.tui
+    .showToast({
+      body: {
+        title: "Failover Debug",
+        message: `Trigger: ${source}${suffix}`,
+        variant: "info",
+        duration: 2600,
+      },
+    })
+    .catch(() => {});
 }
 
 async function processFailover(ctx, sessionID) {
@@ -860,119 +1111,212 @@ async function processFailover(ctx, sessionID) {
 
   const messagesResp = await ctx.client.session.messages({
     path: { id: sessionID },
-    query: { directory: ctx.directory }
+    query: { directory: ctx.directory },
   });
 
   const messages = messagesResp.data ?? [];
-  const lastUserMessage = [...messages].reverse().find((message) => message.info?.role === "user");
+  const lastUserMessage = [...messages]
+    .reverse()
+    .find((message) => message.info?.role === "user");
   if (!lastUserMessage) {
     return;
   }
 
-  const failedAssistant = [...messages].reverse().find((message) => message.info?.role === "assistant" && message.info?.error);
-  const failedModel = pending.failedModel ?? (
-    failedAssistant?.info?.providerID && failedAssistant?.info?.modelID
-      ? { providerID: failedAssistant.info.providerID, modelID: failedAssistant.info.modelID }
-      : null
-  );
+  const failedAssistant = [...messages]
+    .reverse()
+    .find(
+      (message) => message.info?.role === "assistant" && message.info?.error,
+    );
+  const failedModel =
+    pending.failedModel ??
+    (failedAssistant?.info?.providerID && failedAssistant?.info?.modelID
+      ? {
+          providerID: failedAssistant.info.providerID,
+          modelID: failedAssistant.info.modelID,
+        }
+      : null);
 
   const userMessageID = lastUserMessage.info.id;
   const userModel = lastUserMessage.info?.model;
-  const tierHint = pending.modelTierHint
-    ?? inferTierFromModel(failedModel)
-    ?? inferTierFromModel(userModel);
+  const tierHint =
+    pending.modelTierHint ??
+    inferTierFromModel(failedModel) ??
+    inferTierFromModel(userModel);
   if (!tierHint) {
-    await ctx.client.tui.showToast({
-      body: {
-        title: "Model Failover",
-        message: "Skipped automatic failover: unable to infer model tier from the failed run.",
-        variant: "warning",
-        duration: 5000
-      }
-    }).catch(() => {});
+    await ctx.client.tui
+      .showToast({
+        body: {
+          title: "Model Failover",
+          message:
+            "Skipped automatic failover: unable to infer model tier from the failed run.",
+          variant: "warning",
+          duration: 5000,
+        },
+      })
+      .catch(() => {});
     return;
   }
   const attemptedSet = getAttemptedTargets(sessionID, userMessageID);
-  const target = pickFallback(failedModel, attemptedSet, tierHint);
+  let target = pickFallback(failedModel, attemptedSet, tierHint);
 
   if (!target) {
-    await ctx.client.tui.showToast({
+    await ctx.client.tui
+      .showToast({
+        body: {
+          title: "Model Failover",
+          message: "No additional fallback model available.",
+          variant: "error",
+          duration: 4500,
+        },
+      })
+      .catch(() => {});
+    return;
+  }
+
+  const retryParts = (lastUserMessage.parts ?? [])
+    .map(convertPartToInput)
+    .filter(Boolean);
+  const safeParts =
+    retryParts.length > 0 ? retryParts : [{ type: "text", text: "continue" }];
+
+  const MAX_DISPATCH_ATTEMPTS = 10;
+  let attempts = 0;
+
+  while (target && attempts < MAX_DISPATCH_ATTEMPTS) {
+    attempts++;
+    const targetKey = modelKey(target);
+    attemptedSet.add(targetKey);
+
+    await showDebugTriggerToast(
+      ctx,
+      sessionID,
+      "failover.dispatch",
+      `${target.providerID}/${target.modelID}`,
+    );
+
+    await logFailoverEvent("DISPATCH", sessionID, {
+      from: formatModel(failedModel ?? userModel),
+      to: formatModel(target),
+      tier: tierHint,
+    });
+
+    await ctx.client.tui
+      .showToast({
+        body: {
+          title: "Model Failover",
+          message: buildFailoverToastMessage({
+            sessionID,
+            fromModel: failedModel ?? userModel,
+            toModel: target,
+            tierHint,
+            queuedAt: pending.queuedAt,
+          }),
+          variant: "warning",
+          duration: 7000,
+        },
+      })
+      .catch(() => {});
+
+    try {
+      await ctx.client.session.prompt({
+        path: { id: sessionID },
+        query: { directory: ctx.directory },
+        body: {
+          parts: safeParts,
+          agent: lastUserMessage.info.agent,
+          system: lastUserMessage.info.system,
+          tools: lastUserMessage.info.tools,
+          model: target,
+        },
+      });
+      lastGlobalFailoverAt = Date.now();
+      lastGlobalFailoverSession = sessionID;
+      const dispatchLatencyMs =
+        typeof pending.queuedAt === "number"
+          ? Math.max(0, Date.now() - pending.queuedAt)
+          : undefined;
+      if (dispatchLatencyMs !== undefined) {
+        lastFailoverMsBySession.set(sessionID, dispatchLatencyMs);
+      }
+      lastTransitionBySession.set(sessionID, {
+        from: failedModel ?? userModel ?? null,
+        to: target,
+        tierHint,
+        at: Date.now(),
+      });
+      await logFailoverEvent("DISPATCH_OK", sessionID, {
+        from: formatModel(failedModel ?? userModel),
+        to: formatModel(target),
+        tier: tierHint,
+        latency:
+          dispatchLatencyMs !== undefined
+            ? `${dispatchLatencyMs}ms`
+            : undefined,
+      });
+      armStallWatchdog(ctx, sessionID, target, tierHint);
+      return;
+    } catch (dispatchErr) {
+      const errDetail = summarizeDispatchError(dispatchErr);
+      console.error(
+        `[opencode-quota-failover] dispatch to ${formatModel(target)} failed: ${errDetail}`,
+      );
+
+      await logFailoverEvent("DISPATCH_ERROR", sessionID, {
+        target: formatModel(target),
+        tier: tierHint,
+        error: errDetail,
+      });
+
+      await showDebugTriggerToast(
+        ctx,
+        sessionID,
+        "failover.dispatch_error",
+        `${formatModel(target)}: ${errDetail}`,
+      );
+
+      await ctx.client.tui
+        .showToast({
+          body: {
+            title: "Failover Dispatch Error",
+            message: `${formatModel(target)} failed:\n${errDetail}`,
+            variant: "error",
+            duration: 6000,
+          },
+        })
+        .catch(() => {});
+
+      target = pickFallback(failedModel, attemptedSet, tierHint);
+    }
+  }
+
+  await logFailoverEvent("EXHAUSTED", sessionID, {
+    tier: tierHint,
+    chain: providerChainSummary(),
+    attempts,
+  });
+
+  await ctx.client.tui
+    .showToast({
       body: {
         title: "Model Failover",
-        message: "No additional fallback model available.",
+        message:
+          "All fallback providers failed. Check provider configuration and API keys.",
         variant: "error",
-        duration: 4500
-      }
-    }).catch(() => {});
-    return;
-  }
-
-  const retryParts = (lastUserMessage.parts ?? []).map(convertPartToInput).filter(Boolean);
-  const safeParts = retryParts.length > 0 ? retryParts : [{ type: "text", text: "continue" }];
-
-  const targetKey = modelKey(target);
-  attemptedSet.add(targetKey);
-
-  await showDebugTriggerToast(
-    ctx,
-    sessionID,
-    "failover.dispatch",
-    `${target.providerID}/${target.modelID}`
-  );
-
-  await ctx.client.tui.showToast({
-    body: {
-      title: "Model Failover",
-      message: buildFailoverToastMessage({
-        sessionID,
-        fromModel: failedModel ?? userModel,
-        toModel: target,
-        tierHint,
-        queuedAt: pending.queuedAt
-      }),
-      variant: "warning",
-      duration: 7000
-    }
-  }).catch(() => {});
-
-  try {
-    await ctx.client.session.prompt({
-      path: { id: sessionID },
-      query: { directory: ctx.directory },
-      body: {
-        parts: safeParts,
-        agent: lastUserMessage.info.agent,
-        system: lastUserMessage.info.system,
-        tools: lastUserMessage.info.tools,
-        model: target
-      }
-    });
-    lastGlobalFailoverAt = Date.now();
-    lastGlobalFailoverSession = sessionID;
-  } catch {
-    attemptedSet.delete(targetKey);
-    queueFailover(sessionID, pending);
-    return;
-  }
-
-  if (typeof pending.queuedAt === "number") {
-    lastFailoverMsBySession.set(sessionID, Math.max(0, Date.now() - pending.queuedAt));
-  }
-  lastTransitionBySession.set(sessionID, {
-    from: failedModel ?? userModel ?? null,
-    to: target,
-    tierHint,
-    at: Date.now()
-  });
-  armStallWatchdog(ctx, sessionID, target, tierHint);
+        duration: 5000,
+      },
+    })
+    .catch(() => {});
 }
 
-async function runManualFailover(ctx, { sessionID, providerID, modelID, tier }) {
+async function runManualFailover(
+  ctx,
+  { sessionID, providerID, modelID, tier },
+) {
   const startedAt = Date.now();
   clearStallWatchdog(sessionID);
   const messagesResp = await ctx.client.session.messages({
     path: { id: sessionID },
-    query: { directory: ctx.directory }
+    query: { directory: ctx.directory },
   });
   const messages = messagesResp.data ?? [];
   const replayUserMessage = pickReplayUserMessage(messages);
@@ -982,17 +1326,31 @@ async function runManualFailover(ctx, { sessionID, providerID, modelID, tier }) 
 
   const assistantWithModel = [...messages]
     .reverse()
-    .find((message) => message.info?.role === "assistant" && message.info?.providerID && message.info?.modelID);
-  const currentModel = replayUserMessage.info?.model ?? (
-    assistantWithModel
-      ? { providerID: assistantWithModel.info.providerID, modelID: assistantWithModel.info.modelID }
-      : null
-  );
+    .find(
+      (message) =>
+        message.info?.role === "assistant" &&
+        message.info?.providerID &&
+        message.info?.modelID,
+    );
+  const currentModel =
+    replayUserMessage.info?.model ??
+    (assistantWithModel
+      ? {
+          providerID: assistantWithModel.info.providerID,
+          modelID: assistantWithModel.info.modelID,
+        }
+      : null);
 
-  const tierHint = tier
-    ?? inferTierFromModel(providerID && modelID ? { providerID, modelID } : null)
-    ?? inferTierFromModel(currentModel);
-  const attemptedSet = getAttemptedTargets(sessionID, replayUserMessage.info.id);
+  const tierHint =
+    tier ??
+    inferTierFromModel(
+      providerID && modelID ? { providerID, modelID } : null,
+    ) ??
+    inferTierFromModel(currentModel);
+  const attemptedSet = getAttemptedTargets(
+    sessionID,
+    replayUserMessage.info.id,
+  );
 
   let target;
   if (providerID && modelID) {
@@ -1001,7 +1359,7 @@ async function runManualFailover(ctx, { sessionID, providerID, modelID, tier }) 
       return [
         `Unknown model for provider ${providerID}: ${modelID}`,
         "Available models:",
-        ...availableModelsForProvider(providerID).map((id) => `- ${id}`)
+        ...availableModelsForProvider(providerID).map((id) => `- ${id}`),
       ].join("\n");
     }
     target = { providerID, modelID: canonical };
@@ -1029,14 +1387,27 @@ async function runManualFailover(ctx, { sessionID, providerID, modelID, tier }) 
     return `Already on target model ${formatModel(target)}.`;
   }
 
-  const retryParts = (replayUserMessage.parts ?? []).map(convertPartToInput).filter(Boolean);
-  const safeParts = retryParts.length > 0
-    ? retryParts
-    : [{ type: "text", text: "Continue from the latest unfinished task." }];
+  const retryParts = (replayUserMessage.parts ?? [])
+    .map(convertPartToInput)
+    .filter(Boolean);
+  const safeParts =
+    retryParts.length > 0
+      ? retryParts
+      : [{ type: "text", text: "Continue from the latest unfinished task." }];
 
   const targetKey = modelKey(target);
   attemptedSet.add(targetKey);
-  recordTrigger(sessionID, "manual.failover_now", `${formatModel(currentModel)} -> ${formatModel(target)}`);
+  recordTrigger(
+    sessionID,
+    "manual.failover_now",
+    `${formatModel(currentModel)} -> ${formatModel(target)}`,
+  );
+
+  await logFailoverEvent("MANUAL", sessionID, {
+    from: formatModel(currentModel),
+    to: formatModel(target),
+    tier: tierHint,
+  });
 
   try {
     await ctx.client.session.prompt({
@@ -1047,12 +1418,27 @@ async function runManualFailover(ctx, { sessionID, providerID, modelID, tier }) 
         agent: replayUserMessage.info.agent,
         system: replayUserMessage.info.system,
         tools: replayUserMessage.info.tools,
-        model: target
-      }
+        model: target,
+      },
     });
-  } catch {
+  } catch (dispatchErr) {
+    const errDetail = summarizeDispatchError(dispatchErr);
+    console.error(
+      `[opencode-quota-failover] manual dispatch to ${formatModel(target)} failed: ${errDetail}`,
+    );
+    await logFailoverEvent("DISPATCH_ERROR", sessionID, {
+      source: "manual",
+      target: formatModel(target),
+      tier: tierHint,
+      error: errDetail,
+    });
     attemptedSet.delete(targetKey);
-    return "Failed to dispatch failover-now prompt. Target model was not switched.";
+    return [
+      `Failed to dispatch failover to ${formatModel(target)}.`,
+      `Error: ${errDetail}`,
+      "",
+      "Check that the provider is configured in OpenCode and the API key is valid.",
+    ].join("\n");
   }
 
   const elapsedMs = Math.max(0, Date.now() - startedAt);
@@ -1061,9 +1447,17 @@ async function runManualFailover(ctx, { sessionID, providerID, modelID, tier }) 
     from: currentModel ?? null,
     to: target,
     tierHint,
-    at: Date.now()
+    at: Date.now(),
   });
   armStallWatchdog(ctx, sessionID, target, tierHint);
+
+  await logFailoverEvent("DISPATCH_OK", sessionID, {
+    source: "manual",
+    from: formatModel(currentModel),
+    to: formatModel(target),
+    tier: tierHint,
+    latency: `${elapsedMs}ms`,
+  });
 
   return [
     "Failover-now dispatched.",
@@ -1071,29 +1465,41 @@ async function runManualFailover(ctx, { sessionID, providerID, modelID, tier }) 
     `To:   ${formatModel(target)}`,
     `Tier: ${tierHint}`,
     `Replay source: ${replayUserMessage.info.id}`,
-    `Latency: ${elapsedMs}ms`
+    `Latency: ${elapsedMs}ms`,
   ].join("\n");
 }
 
 async function forceFailoverFromRetryStatus(ctx, sessionID) {
-  await showDebugTriggerToast(ctx, sessionID, "session.status(retry)", "aborting built-in retry");
+  await showDebugTriggerToast(
+    ctx,
+    sessionID,
+    "session.status(retry)",
+    "aborting built-in retry",
+  );
 
-  await ctx.client.session.abort({
-    path: { id: sessionID },
-    query: { directory: ctx.directory }
-  }).catch(() => {});
+  await ctx.client.session
+    .abort({
+      path: { id: sessionID },
+      query: { directory: ctx.directory },
+    })
+    .catch(() => {});
 
   await processFailover(ctx, sessionID);
 }
 
 function buildSystemPromptInfo(currentModel, fallbackChain, lastFailoverMs) {
-  const chainText = (fallbackChain
-    .map((model, idx) => `${idx + 1}) ${formatModel(model)}`)
-    .join(" -> ")) || "(none - tier unknown)";
-  const watchdogSeconds = Math.max(1, Math.round((runtimeSettings.stallWatchdogMs ?? 45000) / 1000));
-  const timingText = typeof lastFailoverMs === "number"
-    ? `Last observed takeover latency in this session: ${lastFailoverMs}ms.`
-    : "Takeover timing: runs immediately on retry-status backoff, otherwise triggers once the session reaches idle (usually under a few seconds).";
+  const chainText =
+    fallbackChain
+      .map((model, idx) => `${idx + 1}) ${formatModel(model)}`)
+      .join(" -> ") || "(none - tier unknown)";
+  const watchdogSeconds = Math.max(
+    1,
+    Math.round((runtimeSettings.stallWatchdogMs ?? 45000) / 1000),
+  );
+  const timingText =
+    typeof lastFailoverMs === "number"
+      ? `Last observed takeover latency in this session: ${lastFailoverMs}ms.`
+      : "Takeover timing: runs immediately on retry-status backoff, otherwise triggers once the session reaches idle (usually under a few seconds).";
   const watchdogText = runtimeSettings.stallWatchdogEnabled
     ? `Stall watchdog: auto-reroute if no assistant output within ${watchdogSeconds}s after failover dispatch.`
     : "Stall watchdog: disabled (no auto-reroute on stall).";
@@ -1101,9 +1507,17 @@ function buildSystemPromptInfo(currentModel, fallbackChain, lastFailoverMs) {
   return `${SYSTEM_PROMPT_PREFIX} Current model: ${formatModel(currentModel)}. Failover chain: ${chainText}. ${timingText} ${watchdogText}`;
 }
 
-function buildFailoverToastMessage({ sessionID, fromModel, toModel, tierHint, queuedAt }) {
+function buildFailoverToastMessage({
+  sessionID,
+  fromModel,
+  toModel,
+  tierHint,
+  queuedAt,
+}) {
   const chainText = buildFallbackChain(tierHint).map(formatModel).join(" -> ");
-  const queuedMs = Number.isFinite(queuedAt) ? Math.max(0, Date.now() - queuedAt) : undefined;
+  const queuedMs = Number.isFinite(queuedAt)
+    ? Math.max(0, Date.now() - queuedAt)
+    : undefined;
   const takeoverText = Number.isFinite(queuedMs) ? `${queuedMs}ms` : "n/a";
   const trigger = lastTriggerBySession.get(sessionID);
   const triggerText = trigger
@@ -1117,7 +1531,7 @@ function buildFailoverToastMessage({ sessionID, fromModel, toModel, tierHint, qu
     `Tier: ${tierHint}`,
     `Trigger: ${triggerText}`,
     `Takeover: ${takeoverText}`,
-    `Chain: ${chainText}`
+    `Chain: ${chainText}`,
   ].join("\n");
 }
 
@@ -1127,94 +1541,160 @@ function buildStatusReport(sessionID) {
   lines.push("Quota Failover Status");
   lines.push(`Debug toasts: ${runtimeSettings.debugToasts ? "on" : "off"}`);
   lines.push(`Provider chain: ${providerChainSummary()}`);
-  lines.push(`Stall watchdog timeout: ${formatMs(runtimeSettings.stallWatchdogMs)}`);
-  lines.push(`Stall watchdog: ${runtimeSettings.stallWatchdogEnabled ? "enabled" : "disabled (default)"}`);
-  lines.push(`Global failover cooldown: ${formatMs(runtimeSettings.globalCooldownMs)}`);
-  lines.push(`Min retry backoff threshold: ${formatMs(runtimeSettings.minRetryBackoffMs)}`);
+  lines.push(
+    `Stall watchdog timeout: ${formatMs(runtimeSettings.stallWatchdogMs)}`,
+  );
+  lines.push(
+    `Stall watchdog: ${runtimeSettings.stallWatchdogEnabled ? "enabled" : "disabled (default)"}`,
+  );
+  lines.push(
+    `Global failover cooldown: ${formatMs(runtimeSettings.globalCooldownMs)}`,
+  );
+  lines.push(
+    `Min retry backoff threshold: ${formatMs(runtimeSettings.minRetryBackoffMs)}`,
+  );
   lines.push("Tier mappings:");
   lines.push(fallbackSummaryByTier());
 
   if (!sessionID) {
     lines.push("Session: none selected");
-    lines.push("Quota window note: Claude Max and ChatGPT Pro subscription quota/reset windows are not exposed via plugin APIs.");
-    lines.push("Failover uses observed quota/rate-limit errors and retry windows.");
+    lines.push(
+      "Quota window note: Claude Max and ChatGPT Pro subscription quota/reset windows are not exposed via plugin APIs.",
+    );
+    lines.push(
+      "Failover uses observed quota/rate-limit errors and retry windows.",
+    );
     return lines.join("\n");
   }
 
   lines.push(`Session: ${sessionID}`);
-  lines.push(`Pending failover: ${pendingBySession.has(sessionID) ? "yes" : "no"}`);
+  lines.push(
+    `Pending failover: ${pendingBySession.has(sessionID) ? "yes" : "no"}`,
+  );
   const stall = stallWatchdogBySession.get(sessionID);
   if (stall) {
-    lines.push(`Stall watchdog: armed for ${formatModel(stall.target)} (age ${formatMs(Date.now() - stall.startedAt)}, timeout ${formatMs(stall.timeoutMs)})`);
+    lines.push(
+      `Stall watchdog: armed for ${formatModel(stall.target)} (age ${formatMs(Date.now() - stall.startedAt)}, timeout ${formatMs(stall.timeoutMs)})`,
+    );
   } else {
     lines.push("Stall watchdog: idle");
   }
 
   const lastTrigger = lastTriggerBySession.get(sessionID);
   if (lastTrigger) {
-    lines.push(`Last trigger: ${lastTrigger.source}${lastTrigger.note ? ` (${lastTrigger.note})` : ""}`);
+    lines.push(
+      `Last trigger: ${lastTrigger.source}${lastTrigger.note ? ` (${lastTrigger.note})` : ""}`,
+    );
   } else {
     lines.push("Last trigger: none");
   }
 
   const retryStatus = lastRetryStatusBySession.get(sessionID);
   if (retryStatus) {
-    lines.push(`Last retry backoff: ${formatMs(retryStatus.retryBackoffMs)} (attempt ${retryStatus.attempt ?? "?"})`);
+    lines.push(
+      `Last retry backoff: ${formatMs(retryStatus.retryBackoffMs)} (attempt ${retryStatus.attempt ?? "?"})`,
+    );
   } else {
     lines.push("Last retry backoff: none seen");
   }
 
   const failoverMs = lastFailoverMsBySession.get(sessionID);
-  lines.push(`Last failover latency: ${typeof failoverMs === "number" ? `${failoverMs}ms` : "n/a"}`);
+  lines.push(
+    `Last failover latency: ${typeof failoverMs === "number" ? `${failoverMs}ms` : "n/a"}`,
+  );
 
   const transition = lastTransitionBySession.get(sessionID);
   if (transition) {
-    lines.push(`Last transition: ${formatModel(transition.from)} -> ${formatModel(transition.to)} (tier=${transition.tierHint})`);
+    lines.push(
+      `Last transition: ${formatModel(transition.from)} -> ${formatModel(transition.to)} (tier=${transition.tierHint})`,
+    );
   } else {
     lines.push("Last transition: none");
   }
 
   const assistantStats = lastAssistantStatsBySession.get(sessionID);
   if (!assistantStats) {
-    lines.push("Context headroom: unknown (no assistant usage snapshot seen yet).");
+    lines.push(
+      "Context headroom: unknown (no assistant usage snapshot seen yet).",
+    );
   } else {
     const currentModel = {
       providerID: assistantStats.providerID,
-      modelID: assistantStats.modelID
+      modelID: assistantStats.modelID,
     };
     const tierHint = inferTierFromModel(currentModel);
     const currentLimit = estimateModelContextLimit(assistantStats.modelID);
     const inputTokens = assistantStats.inputTokens;
 
-    lines.push(`Last model usage: ${formatModel(currentModel)} (input=${formatCount(inputTokens)}, output=${formatCount(assistantStats.outputTokens)}, reasoning=${formatCount(assistantStats.reasoningTokens)})`);
+    lines.push(
+      `Last model usage: ${formatModel(currentModel)} (input=${formatCount(inputTokens)}, output=${formatCount(assistantStats.outputTokens)}, reasoning=${formatCount(assistantStats.reasoningTokens)})`,
+    );
 
     if (Number.isFinite(inputTokens) && Number.isFinite(currentLimit)) {
       const currentRemaining = Math.max(0, currentLimit - inputTokens);
-      const usedPct = Math.min(100, Math.max(0, (inputTokens / currentLimit) * 100));
-      lines.push(`Context headroom (current): ${formatCount(currentRemaining)} / ${formatCount(currentLimit)} tokens left (${usedPct.toFixed(1)}% used from last input).`);
+      const usedPct = Math.min(
+        100,
+        Math.max(0, (inputTokens / currentLimit) * 100),
+      );
+      lines.push(
+        `Context headroom (current): ${formatCount(currentRemaining)} / ${formatCount(currentLimit)} tokens left (${usedPct.toFixed(1)}% used from last input).`,
+      );
 
-      const fallbackCandidate = buildFallbackChain(tierHint).find((candidate) => modelKey(candidate) !== modelKey(currentModel));
+      const fallbackCandidate = buildFallbackChain(tierHint).find(
+        (candidate) => modelKey(candidate) !== modelKey(currentModel),
+      );
       if (fallbackCandidate) {
-        const fallbackLimit = estimateModelContextLimit(fallbackCandidate.modelID);
+        const fallbackLimit = estimateModelContextLimit(
+          fallbackCandidate.modelID,
+        );
         if (Number.isFinite(fallbackLimit)) {
           const fallbackRemaining = Math.max(0, fallbackLimit - inputTokens);
-          lines.push(`Context headroom (first fallback ${formatModel(fallbackCandidate)}): ${formatCount(fallbackRemaining)} / ${formatCount(fallbackLimit)} tokens left (same prompt estimate).`);
+          lines.push(
+            `Context headroom (first fallback ${formatModel(fallbackCandidate)}): ${formatCount(fallbackRemaining)} / ${formatCount(fallbackLimit)} tokens left (same prompt estimate).`,
+          );
         } else {
-          lines.push(`Context headroom (first fallback ${formatModel(fallbackCandidate)}): unknown (limit metadata unavailable).`);
+          lines.push(
+            `Context headroom (first fallback ${formatModel(fallbackCandidate)}): unknown (limit metadata unavailable).`,
+          );
         }
       }
     } else {
-      lines.push("Context headroom: unknown (provider does not expose enough token/limit metadata for this model snapshot).");
+      lines.push(
+        "Context headroom: unknown (provider does not expose enough token/limit metadata for this model snapshot).",
+      );
     }
   }
 
-  lines.push("Quota window note: Claude Max and ChatGPT Pro subscription quota/reset windows are not exposed via plugin APIs.");
-  lines.push("Failover uses observed quota/rate-limit errors and retry windows.");
+  lines.push(
+    "Quota window note: Claude Max and ChatGPT Pro subscription quota/reset windows are not exposed via plugin APIs.",
+  );
+  lines.push(
+    "Failover uses observed quota/rate-limit errors and retry windows.",
+  );
+
+  lines.push("");
+  lines.push(`Log file: ${logPathForRuntime()}`);
+  if (failoverEventLog.length > 0) {
+    const recentCount = Math.min(failoverEventLog.length, 15);
+    lines.push(
+      `Recent events (last ${recentCount} of ${failoverEventLog.length}):`,
+    );
+    for (const entry of failoverEventLog.slice(-recentCount)) {
+      lines.push(`  ${entry}`);
+    }
+  } else {
+    lines.push("Recent events: none");
+  }
 
   return lines.join("\n");
 }
 
-export { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal };
+export {
+  isUsageLimitError,
+  isDefinitiveQuotaError,
+  isAmbiguousRateLimitSignal,
+  failoverEventLog,
+};
 
 export default async function quotaFailoverPlugin(ctx) {
   resetRuntimeSettings();
@@ -1226,13 +1706,15 @@ export default async function quotaFailoverPlugin(ctx) {
       failover_set_debug: tool({
         description: "Enable or disable quota-failover debug trigger toasts.",
         args: {
-          enabled: tool.schema.boolean().describe("Set true to enable debug toasts, false to disable")
+          enabled: tool.schema
+            .boolean()
+            .describe("Set true to enable debug toasts, false to disable"),
         },
         async execute(args) {
           runtimeSettings.debugToasts = args.enabled;
           await saveRuntimeSettings(settingsPath).catch(() => {});
           return `Failover debug toasts are now ${args.enabled ? "enabled" : "disabled"}.`;
-        }
+        },
       }),
       failover_set_providers: tool({
         description: "Set ordered providers used for automatic failover.",
@@ -1240,7 +1722,7 @@ export default async function quotaFailoverPlugin(ctx) {
           providers: tool.schema
             .array(tool.schema.enum(["amazon-bedrock", "openai", "anthropic"]))
             .min(1)
-            .describe("Provider order used when failover is triggered")
+            .describe("Provider order used when failover is triggered"),
         },
         async execute(args) {
           const normalized = normalizeProviderList(args.providers);
@@ -1253,9 +1735,9 @@ export default async function quotaFailoverPlugin(ctx) {
           return [
             `Failover provider chain updated: ${providerChainSummary()}`,
             "Tier mappings:",
-            fallbackSummaryByTier()
+            fallbackSummaryByTier(),
           ].join("\n");
-        }
+        },
       }),
       failover_list_models: tool({
         description: "List available failover models and active tier mappings.",
@@ -1263,11 +1745,11 @@ export default async function quotaFailoverPlugin(ctx) {
           provider: tool.schema
             .enum(["amazon-bedrock", "openai", "anthropic"])
             .optional()
-            .describe("Optional provider filter")
+            .describe("Optional provider filter"),
         },
         async execute(args) {
           return buildModelCatalogReport(args.provider);
-        }
+        },
       }),
       failover_set_model: tool({
         description: "Set the fallback model for a provider and tier.",
@@ -1282,11 +1764,13 @@ export default async function quotaFailoverPlugin(ctx) {
           tier: tool.schema
             .enum(["opus", "sonnet", "haiku"])
             .optional()
-            .describe("Optional tier. If omitted, inferred from model ID when possible."),
+            .describe(
+              "Optional tier. If omitted, inferred from model ID when possible.",
+            ),
           allTiers: tool.schema
             .boolean()
             .optional()
-            .describe("Set this model for opus, sonnet, and haiku tiers")
+            .describe("Set this model for opus, sonnet, and haiku tiers"),
         },
         async execute(args) {
           const providerID = args.provider;
@@ -1295,7 +1779,7 @@ export default async function quotaFailoverPlugin(ctx) {
             return [
               `Unknown model for provider ${providerID}: ${args.modelID}`,
               "Available models:",
-              ...availableModelsForProvider(providerID).map((id) => `- ${id}`)
+              ...availableModelsForProvider(providerID).map((id) => `- ${id}`),
             ].join("\n");
           }
 
@@ -1322,9 +1806,16 @@ export default async function quotaFailoverPlugin(ctx) {
           await saveRuntimeSettings(settingsPath).catch(() => {});
 
           const warnings = [];
-          if (providerID === "amazon-bedrock" && modelID === "moonshotai.kimi-k2.5") {
-            warnings.push("Warning: moonshotai.kimi-k2.5 can have long first-token latency in tool-heavy sessions.");
-            warnings.push("Tip: try moonshot.kimi-k2-thinking for faster/stabler interactive tool use.");
+          if (
+            providerID === "amazon-bedrock" &&
+            modelID === "moonshotai.kimi-k2.5"
+          ) {
+            warnings.push(
+              "Warning: moonshotai.kimi-k2.5 can have long first-token latency in tool-heavy sessions.",
+            );
+            warnings.push(
+              "Tip: try moonshot.kimi-k2-thinking for faster/stabler interactive tool use.",
+            );
           }
 
           return [
@@ -1334,29 +1825,36 @@ export default async function quotaFailoverPlugin(ctx) {
             ...(warnings.length ? ["", ...warnings] : []),
             "",
             "Tier mappings:",
-            fallbackSummaryByTier()
+            fallbackSummaryByTier(),
           ].join("\n");
-        }
+        },
       }),
       failover_now: tool({
-        description: "Immediately trigger failover to the next configured fallback model.",
+        description:
+          "Immediately trigger failover to the next configured fallback model.",
         args: {
           sessionID: tool.schema
             .string()
             .optional()
-            .describe("Optional session ID. Defaults to the current session where the tool is called."),
+            .describe(
+              "Optional session ID. Defaults to the current session where the tool is called.",
+            ),
           provider: tool.schema
             .enum(["amazon-bedrock", "openai", "anthropic"])
             .optional()
-            .describe("Optional provider target. If omitted, use provider chain progression."),
+            .describe(
+              "Optional provider target. If omitted, use provider chain progression.",
+            ),
           modelID: tool.schema
             .string()
             .optional()
-            .describe("Optional explicit model ID. Requires provider when set."),
+            .describe(
+              "Optional explicit model ID. Requires provider when set.",
+            ),
           tier: tool.schema
             .enum(["opus", "sonnet", "haiku"])
             .optional()
-            .describe("Optional tier hint when provider/model is specified.")
+            .describe("Optional tier hint when provider/model is specified."),
         },
         async execute(args, context) {
           const sessionID = args.sessionID?.trim() || context.sessionID;
@@ -1372,23 +1870,26 @@ export default async function quotaFailoverPlugin(ctx) {
             sessionID,
             providerID: args.provider,
             modelID: args.modelID,
-            tier: args.tier
+            tier: args.tier,
           });
-        }
+        },
       }),
       failover_status: tool({
-        description: "Show quota failover status, provider chain, and session context headroom estimates.",
+        description:
+          "Show quota failover status, provider chain, and session context headroom estimates.",
         args: {
           sessionID: tool.schema
             .string()
             .optional()
-            .describe("Optional session ID. Defaults to the current session where the tool is called.")
+            .describe(
+              "Optional session ID. Defaults to the current session where the tool is called.",
+            ),
         },
         async execute(args, context) {
           const sessionID = args.sessionID?.trim() || context.sessionID;
           return buildStatusReport(sessionID);
-        }
-      })
+        },
+      }),
     },
     "chat.message": async (input, _output) => {
       const sessionID = input.sessionID;
@@ -1400,33 +1901,44 @@ export default async function quotaFailoverPlugin(ctx) {
       const tierHint = inferTierFromModel(currentModel);
       const fallbackChain = buildFallbackChain(tierHint);
       const lastFailoverMs = lastFailoverMsBySession.get(sessionID);
-      const line = buildSystemPromptInfo(currentModel, fallbackChain, lastFailoverMs)
-        .replace(`${SYSTEM_PROMPT_PREFIX} `, "");
+      const line = buildSystemPromptInfo(
+        currentModel,
+        fallbackChain,
+        lastFailoverMs,
+      ).replace(`${SYSTEM_PROMPT_PREFIX} `, "");
 
-      await ctx.client.tui.showToast({
-        body: {
-          title: "Failover Active",
-          message: line,
-          variant: "info",
-          duration: 6500
-        }
-      }).catch(() => {});
+      await ctx.client.tui
+        .showToast({
+          body: {
+            title: "Failover Active",
+            message: line,
+            variant: "info",
+            duration: 6500,
+          },
+        })
+        .catch(() => {});
 
       infoShownBySession.add(sessionID);
     },
     "experimental.chat.system.transform": async (input, output) => {
       const currentModel = {
         providerID: input.model?.providerID,
-        modelID: input.model?.id
+        modelID: input.model?.id,
       };
       const tierHint = inferTierFromModel(currentModel);
       const fallbackChain = buildFallbackChain(tierHint);
       const lastFailoverMs = input.sessionID
         ? lastFailoverMsBySession.get(input.sessionID)
         : undefined;
-      const line = buildSystemPromptInfo(currentModel, fallbackChain, lastFailoverMs);
+      const line = buildSystemPromptInfo(
+        currentModel,
+        fallbackChain,
+        lastFailoverMs,
+      );
 
-      output.system = (output.system ?? []).filter((entry) => !entry.startsWith(SYSTEM_PROMPT_PREFIX));
+      output.system = (output.system ?? []).filter(
+        (entry) => !entry.startsWith(SYSTEM_PROMPT_PREFIX),
+      );
       output.system.push(line);
     },
     event: async ({ event }) => {
@@ -1448,7 +1960,7 @@ export default async function quotaFailoverPlugin(ctx) {
             inputTokens: safeNumber(info.tokens?.input),
             outputTokens: safeNumber(info.tokens?.output),
             reasoningTokens: safeNumber(info.tokens?.reasoning),
-            at: Date.now()
+            at: Date.now(),
           });
 
           if (info.error || safeNumber(info.tokens?.output) > 0) {
@@ -1457,25 +1969,40 @@ export default async function quotaFailoverPlugin(ctx) {
 
           const failedModel = {
             providerID: info.providerID,
-            modelID: info.modelID
+            modelID: info.modelID,
           };
-          if (!info.error || !shouldTriggerFailover(info.error, failedModel, { requireDefinitive: true })) {
+          if (
+            !info.error ||
+            !shouldTriggerFailover(info.error, failedModel, {
+              requireDefinitive: true,
+            })
+          ) {
             return;
           }
 
           if (isWithinGlobalCooldown(info.sessionID)) {
             return;
           }
-          const forceOpusTier = isBedrockOpusModel(failedModel) && isThinkingBlockMutationError(info.error);
+          const forceOpusTier =
+            isBedrockOpusModel(failedModel) &&
+            isThinkingBlockMutationError(info.error);
           queueFailover(info.sessionID, {
-            modelTierHint: forceOpusTier ? "opus" : inferTierFromModel(failedModel),
-            failedModel
+            modelTierHint: forceOpusTier
+              ? "opus"
+              : inferTierFromModel(failedModel),
+            failedModel,
+          });
+          await logFailoverEvent("TRIGGER", info.sessionID, {
+            source: "message.updated",
+            from: formatModel(failedModel),
+            reason: summarizeDispatchError(info.error),
+            tier: forceOpusTier ? "opus" : inferTierFromModel(failedModel),
           });
           await showDebugTriggerToast(
             ctx,
             info.sessionID,
             "message.updated",
-            `${info.providerID}/${info.modelID}`
+            `${info.providerID}/${info.modelID}: ${summarizeDispatchError(info.error)}`,
           );
           return;
         }
@@ -1500,14 +2027,18 @@ export default async function quotaFailoverPlugin(ctx) {
             attempt: status.attempt,
             nextAt: status.next,
             message: status.message,
-            retryBackoffMs: parseRetryBackoffMs(status.message)
+            retryBackoffMs: parseRetryBackoffMs(status.message),
           });
 
           const retryMessage = status.message;
           const lastAssistant = lastAssistantStatsBySession.get(sessionID);
-          const failedModel = (lastAssistant?.providerID && lastAssistant?.modelID)
-            ? { providerID: lastAssistant.providerID, modelID: lastAssistant.modelID }
-            : null;
+          const failedModel =
+            lastAssistant?.providerID && lastAssistant?.modelID
+              ? {
+                  providerID: lastAssistant.providerID,
+                  modelID: lastAssistant.modelID,
+                }
+              : null;
           if (!shouldTriggerFailover(retryMessage, failedModel)) {
             return;
           }
@@ -1523,10 +2054,24 @@ export default async function quotaFailoverPlugin(ctx) {
             return;
           }
 
-          const forceOpusTier = isBedrockOpusModel(failedModel) && isThinkingBlockMutationError(retryMessage);
-          queueFailover(sessionID, forceOpusTier
-            ? { modelTierHint: "opus", failedModel }
-            : (failedModel ? { failedModel } : {}));
+          const forceOpusTier =
+            isBedrockOpusModel(failedModel) &&
+            isThinkingBlockMutationError(retryMessage);
+          queueFailover(
+            sessionID,
+            forceOpusTier
+              ? { modelTierHint: "opus", failedModel }
+              : failedModel
+                ? { failedModel }
+                : {},
+          );
+          await logFailoverEvent("TRIGGER", sessionID, {
+            source: "session.status(retry)",
+            from: failedModel ? formatModel(failedModel) : "unknown",
+            reason: summarizeText(retryMessage, 140),
+            backoff: formatMs(retryBackoffMs),
+            attempt: status.attempt,
+          });
           await forceFailoverFromRetryStatus(ctx, sessionID);
           return;
         }
@@ -1534,26 +2079,54 @@ export default async function quotaFailoverPlugin(ctx) {
         if (event.type === "session.error") {
           const sessionID = event.properties?.sessionID;
           const error = event.properties?.error;
-          const lastAssistant = sessionID ? lastAssistantStatsBySession.get(sessionID) : null;
-          const failedModel = (lastAssistant?.providerID && lastAssistant?.modelID)
-            ? { providerID: lastAssistant.providerID, modelID: lastAssistant.modelID }
+          const lastAssistant = sessionID
+            ? lastAssistantStatsBySession.get(sessionID)
             : null;
-          if (!sessionID || !error || !shouldTriggerFailover(error, failedModel, { requireDefinitive: true })) {
+          const failedModel =
+            lastAssistant?.providerID && lastAssistant?.modelID
+              ? {
+                  providerID: lastAssistant.providerID,
+                  modelID: lastAssistant.modelID,
+                }
+              : null;
+          if (
+            !sessionID ||
+            !error ||
+            !shouldTriggerFailover(error, failedModel, {
+              requireDefinitive: true,
+            })
+          ) {
             return;
           }
 
           if (isWithinGlobalCooldown(sessionID)) {
             return;
           }
-          const forceOpusTier = isBedrockOpusModel(failedModel) && isThinkingBlockMutationError(error);
-          queueFailover(sessionID, forceOpusTier
-            ? { modelTierHint: "opus", failedModel }
-            : (failedModel ? { failedModel } : {}));
+          const forceOpusTier =
+            isBedrockOpusModel(failedModel) &&
+            isThinkingBlockMutationError(error);
+          queueFailover(
+            sessionID,
+            forceOpusTier
+              ? { modelTierHint: "opus", failedModel }
+              : failedModel
+                ? { failedModel }
+                : {},
+          );
+          await logFailoverEvent("TRIGGER", sessionID, {
+            source: "session.error",
+            from: failedModel ? formatModel(failedModel) : "unknown",
+            reason: forceOpusTier
+              ? "thinking_block_mutation"
+              : summarizeDispatchError(error),
+          });
           await showDebugTriggerToast(
             ctx,
             sessionID,
             "session.error",
-            forceOpusTier ? "bedrock opus thinking/redacted_thinking immutable-block error detected" : "usage/rate limit detected"
+            forceOpusTier
+              ? "bedrock opus thinking/redacted_thinking immutable-block error detected"
+              : `usage/rate limit: ${summarizeDispatchError(error)}`,
           );
           return;
         }
@@ -1571,6 +2144,6 @@ export default async function quotaFailoverPlugin(ctx) {
       } catch (error) {
         console.error("[opencode-quota-failover] failed:", error);
       }
-    }
+    },
   };
 }

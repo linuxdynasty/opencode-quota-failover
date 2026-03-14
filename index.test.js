@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal } from "./index.js";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, failoverEventLog } from "./index.js";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,8 +21,8 @@ function writeDefaultTestSettings() {
             haiku: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
           },
           openai: {
-            opus: "gpt-5.3-codex",
-            sonnet: "gpt-5.2-codex",
+            opus: "gpt-5.4",
+            sonnet: "gpt-5.3-codex",
             haiku: "gpt-5.2-codex"
           },
           anthropic: {
@@ -233,7 +233,7 @@ describe("opencode-quota-failover", () => {
     expect(toastCalls[0].body.title).toBe("Failover Active");
     expect(toastCalls[0].body.message).toContain("Current model: anthropic/claude-sonnet-4-6");
     expect(toastCalls[0].body.message).toContain("1) amazon-bedrock/us.anthropic.claude-sonnet-4-6");
-    expect(toastCalls[0].body.message).toContain("2) openai/gpt-5.2-codex");
+    expect(toastCalls[0].body.message).toContain("2) openai/gpt-5.3-codex");
   });
 
   test("system prompt shows current model, fallback models, and timing policy", async () => {
@@ -256,7 +256,7 @@ describe("opencode-quota-failover", () => {
     expect(output.system[0]).toContain("[opencode-quota-failover]");
     expect(output.system[0]).toContain("Current model: anthropic/claude-sonnet-4-6");
     expect(output.system[0]).toContain("1) amazon-bedrock/us.anthropic.claude-sonnet-4-6");
-    expect(output.system[0]).toContain("2) openai/gpt-5.2-codex");
+    expect(output.system[0]).toContain("2) openai/gpt-5.3-codex");
     expect(output.system[0]).toContain("Takeover timing:");
   });
 
@@ -294,7 +294,7 @@ describe("opencode-quota-failover", () => {
     expect(promptCalls).toHaveLength(1);
     expect(promptCalls[0].body.model).toEqual({
       providerID: "amazon-bedrock",
-      modelID: "us.anthropic.claude-opus-4-6-v1"
+      modelID: "us.anthropic.claude-sonnet-4-6"
     });
     expect(promptCalls[0].body.agent).toBe("gsd-executor");
     expect(promptCalls[0].body.parts[0]).toMatchObject({ type: "text", text: "retry this request" });
@@ -535,7 +535,7 @@ describe("opencode-quota-failover", () => {
     });
     expect(promptCalls[1].body.model).toEqual({
       providerID: "openai",
-      modelID: "gpt-5.2-codex"
+      modelID: "gpt-5.3-codex"
     });
     expect(promptCalls[1].body.agent).toBe("gsd-verifier");
   });
@@ -719,10 +719,10 @@ describe("opencode-quota-failover", () => {
       });
 
       expect(promptCalls).toHaveLength(1);
-      expect(promptCalls[0].body.model).toEqual({
-        providerID: "amazon-bedrock",
-        modelID: "us.anthropic.claude-opus-4-6-v1"
-      });
+    expect(promptCalls[0].body.model).toEqual({
+      providerID: "amazon-bedrock",
+      modelID: "us.anthropic.claude-opus-4-6-v1"
+    });
       expect(timers).toHaveLength(1);
       expect(timers[0].ms).toBe(45000);
 
@@ -733,7 +733,7 @@ describe("opencode-quota-failover", () => {
       expect(promptCalls).toHaveLength(2);
       expect(promptCalls[1].body.model).toEqual({
         providerID: "openai",
-        modelID: "gpt-5.3-codex"
+        modelID: "gpt-5.4"
       });
     });
   });
@@ -1352,7 +1352,7 @@ describe("opencode-quota-failover", () => {
     expect(promptCalls).toHaveLength(1);
     expect(promptCalls[0].body.model).toEqual({
       providerID: "openai",
-      modelID: "gpt-5.2-codex"
+      modelID: "gpt-5.3-codex"
     });
     expect(promptCalls[0].body.agent).toBe("gsd-debugger");
 
@@ -1541,7 +1541,7 @@ describe("opencode-quota-failover", () => {
       const hooksReloaded = await quotaFailoverPlugin(ctxReloaded);
       const status = await hooksReloaded.tool.failover_status.execute({}, makeToolContext(sessionID));
 
-      expect(status).toContain("sonnet: amazon-bedrock/moonshot.kimi-k2-thinking -> openai/gpt-5.2-codex");
+      expect(status).toContain("sonnet: amazon-bedrock/moonshot.kimi-k2-thinking -> openai/gpt-5.3-codex");
 
     });
   });
@@ -1996,6 +1996,596 @@ describe("opencode-quota-failover", () => {
     expect(promptCalls[0].body.model).toEqual({
       providerID: "amazon-bedrock",
       modelID: "us.anthropic.claude-opus-4-6-v1"
+    });
+  });
+
+  describe("processFailover dispatch failure handling", () => {
+    function createContextWithFailingPrompt(messagesBySession, failConfig = {}) {
+      const promptCalls = [];
+      const toastCalls = [];
+      const abortCalls = [];
+      let promptCallCount = 0;
+
+      const ctx = {
+        directory: process.cwd(),
+        client: {
+          session: {
+            messages: async ({ path }) => ({
+              data: messagesBySession[path.id] ?? []
+            }),
+            prompt: async (request) => {
+              promptCallCount++;
+              const targetProvider = request.body?.model?.providerID;
+              if (failConfig.failProviders?.includes(targetProvider)) {
+                throw new Error(failConfig.errorMessage ?? `Provider ${targetProvider} not configured`);
+              }
+              if (failConfig.failOnCalls?.includes(promptCallCount)) {
+                throw new Error(failConfig.errorMessage ?? "dispatch failed");
+              }
+              promptCalls.push(request);
+              return { data: {} };
+            },
+            abort: async (request) => {
+              abortCalls.push(request);
+              return { data: true };
+            }
+          },
+          tui: {
+            showToast: async (request) => {
+              toastCalls.push(request);
+              return { data: true };
+            }
+          }
+        }
+      };
+      return { ctx, promptCalls, toastCalls, abortCalls };
+    }
+
+    test("advances to next provider when dispatch fails for first target", async () => {
+      const sessionID = "s-dispatch-advance";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-dispatch-advance",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+      const { ctx, promptCalls, toastCalls } = createContextWithFailingPrompt(messagesBySession, {
+        failProviders: ["amazon-bedrock"]
+      });
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      expect(promptCalls).toHaveLength(1);
+      expect(promptCalls[0].body.model.providerID).toBe("openai");
+    });
+
+    test("shows dispatch error toast with actual error message", async () => {
+      const sessionID = "s-dispatch-error-toast";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-dispatch-error-toast",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+      const { ctx, toastCalls } = createContextWithFailingPrompt(messagesBySession, {
+        failProviders: ["amazon-bedrock"],
+        errorMessage: "401 Unauthorized: invalid API key"
+      });
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      const errorToast = toastCalls.find((c) => c?.body?.title === "Failover Dispatch Error");
+      expect(errorToast).toBeDefined();
+      expect(errorToast.body.message).toContain("401 Unauthorized: invalid API key");
+      expect(errorToast.body.variant).toBe("error");
+    });
+
+    test("shows exhaustion toast when all fallback providers fail dispatch", async () => {
+      const sessionID = "s-dispatch-exhausted";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-dispatch-exhausted",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+      const { ctx, promptCalls, toastCalls } = createContextWithFailingPrompt(messagesBySession, {
+        failProviders: ["amazon-bedrock", "openai"]
+      });
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      expect(promptCalls).toHaveLength(0);
+      const exhaustionToast = toastCalls.find((c) =>
+        c?.body?.title === "Model Failover" && c?.body?.message?.includes("All fallback providers failed")
+      );
+      expect(exhaustionToast).toBeDefined();
+      expect(exhaustionToast.body.variant).toBe("error");
+    });
+
+    test("keeps failed target in attemptedSet — does not retry same provider", async () => {
+      const sessionID = "s-dispatch-no-retry";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-dispatch-no-retry",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+
+      const { ctx, promptCalls } = createContextWithFailingPrompt(messagesBySession, {
+        failProviders: ["amazon-bedrock"]
+      });
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.tool.failover_set_providers.execute(
+        { providers: ["amazon-bedrock", "openai", "anthropic"] },
+        makeToolContext(sessionID)
+      );
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      expect(promptCalls).toHaveLength(1);
+      expect(promptCalls[0].body.model.providerID).toBe("openai");
+
+      await hooks.tool.failover_set_providers.execute(
+        { providers: ["amazon-bedrock", "openai"] },
+        makeToolContext(sessionID)
+      );
+    });
+
+    test("runManualFailover returns detailed error when dispatch fails", async () => {
+      const sessionID = "s-manual-dispatch-error";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-manual-dispatch-error",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6",
+            text: "continue the task"
+          })
+        ]
+      };
+      const { ctx } = createContextWithFailingPrompt(messagesBySession, {
+        failProviders: ["amazon-bedrock"],
+        errorMessage: "404 Model gpt-5.3-codex not found"
+      });
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      const result = await hooks.tool.failover_now.execute({}, makeToolContext(sessionID));
+
+      expect(result).toContain("404 Model gpt-5.3-codex not found");
+      expect(result).toContain("Check that the provider");
+    });
+
+    test("summarizeDispatchError extracts status and message from nested error shapes", async () => {
+      const sessionID = "s-error-shape-status";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-error-shape-status",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6",
+            text: "continue"
+          })
+        ]
+      };
+
+      const shapes = [
+        { error: { message: "not found", statusCode: 404 }, expectedParts: ["404", "not found"] },
+        { error: { message: "err", data: { message: "invalid key", statusCode: 401 } }, expectedParts: ["401", "invalid key"] },
+        { error: { message: "raw string error" }, expectedParts: ["raw string error"] },
+      ];
+
+      for (const { error, expectedParts } of shapes) {
+        let promptCallCount = 0;
+        const toastCalls = [];
+        const ctx = {
+          directory: process.cwd(),
+          client: {
+            session: {
+              messages: async ({ path }) => ({
+                data: messagesBySession[path.id] ?? []
+              }),
+              prompt: async () => {
+                promptCallCount++;
+                const err = new Error(error.message ?? "fail");
+                if (error.statusCode) err.statusCode = error.statusCode;
+                if (error.status) err.status = error.status;
+                if (error.data) err.data = error.data;
+                if (error.code) err.code = error.code;
+                throw err;
+              },
+              abort: async () => ({ data: true })
+            },
+            tui: {
+              showToast: async (request) => {
+                toastCalls.push(request);
+                return { data: true };
+              }
+            }
+          }
+        };
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_now.execute({}, makeToolContext(sessionID));
+
+        const errorToast = toastCalls.find((c) => c?.body?.title === "Failover Dispatch Error");
+        if (errorToast) {
+          for (const part of expectedParts) {
+            expect(errorToast.body.message).toContain(part);
+          }
+        } else {
+          const lastResult = await hooks.tool.failover_now.execute({}, makeToolContext(sessionID));
+          for (const part of expectedParts) {
+            expect(lastResult).toContain(part);
+          }
+        }
+      }
+    });
+
+    test("debug toast includes error details for message.updated quota trigger", async () => {
+      const sessionID = "s-debug-toast-error-details";
+      const errorObj = {
+        name: "APIError",
+        message: "insufficient_quota",
+        data: {
+          message: "quota exceeded",
+          statusCode: 429,
+          isRetryable: false
+        }
+      };
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-debug-toast-error-details",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          {
+            info: {
+              id: "a-debug-toast-error-details",
+              sessionID,
+              role: "assistant",
+              providerID: "anthropic",
+              modelID: "claude-opus-4-6",
+              error: errorObj
+            },
+            parts: []
+          }
+        ]
+      };
+      const { ctx, toastCalls } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+
+      const debugToast = toastCalls.find(
+        (c) => c?.body?.title === "Failover Debug" && c?.body?.message?.includes("message.updated")
+      );
+      expect(debugToast).toBeDefined();
+      const msg = debugToast.body.message;
+      expect(msg.includes("quota exceeded") || msg.includes("insufficient_quota")).toBe(true);
+    });
+  });
+
+  describe("failover event logging", () => {
+    test("logs TRIGGER event with timestamp and reason when quota error detected", async () => {
+      const sessionID = "s-log-trigger";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-log-trigger",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+      const { ctx } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+
+      const triggerEntry = failoverEventLog.find((e) => e.includes("[TRIGGER]") && e.includes(sessionID.slice(0, 16)));
+      expect(triggerEntry).toBeDefined();
+      expect(triggerEntry).toContain("source=message.updated");
+      expect(triggerEntry).toContain("anthropic/claude-opus-4-6");
+      expect(triggerEntry).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    test("logs DISPATCH and DISPATCH_OK events on successful failover", async () => {
+      const sessionID = "s-log-dispatch-ok";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-log-dispatch-ok",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+      const { ctx } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      const dispatchEntry = failoverEventLog.find((e) => e.includes("[DISPATCH]") && !e.includes("DISPATCH_OK") && !e.includes("DISPATCH_ERROR") && e.includes(sessionID.slice(0, 16)));
+      expect(dispatchEntry).toBeDefined();
+      expect(dispatchEntry).toContain("to=amazon-bedrock/us.anthropic.claude-opus-4-6-v1");
+
+      const okEntry = failoverEventLog.find((e) => e.includes("[DISPATCH_OK]") && e.includes(sessionID.slice(0, 16)));
+      expect(okEntry).toBeDefined();
+      expect(okEntry).toContain("to=amazon-bedrock/us.anthropic.claude-opus-4-6-v1");
+      expect(okEntry).toMatch(/latency=\d+ms/);
+    });
+
+    test("logs DISPATCH_ERROR with error details when dispatch fails", async () => {
+      const sessionID = "s-log-dispatch-error";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-log-dispatch-error",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+
+      const promptCalls = [];
+      const ctx = {
+        directory: process.cwd(),
+        client: {
+          session: {
+            messages: async ({ path }) => ({ data: messagesBySession[path.id] ?? [] }),
+            prompt: async (request) => {
+              if (request.body?.model?.providerID === "amazon-bedrock") {
+                throw new Error("401 Unauthorized: invalid API key for bedrock");
+              }
+              promptCalls.push(request);
+              return { data: {} };
+            },
+            abort: async () => ({ data: true })
+          },
+          tui: { showToast: async () => ({ data: true }) }
+        }
+      };
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      const errorEntry = failoverEventLog.find((e) => e.includes("[DISPATCH_ERROR]") && e.includes(sessionID.slice(0, 16)));
+      expect(errorEntry).toBeDefined();
+      expect(errorEntry).toContain("target=amazon-bedrock/us.anthropic.claude-opus-4-6-v1");
+      expect(errorEntry).toContain("401 Unauthorized");
+    });
+
+    test("logs EXHAUSTED when all providers fail dispatch", async () => {
+      const sessionID = "s-log-exhausted";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-log-exhausted",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+
+      const ctx = {
+        directory: process.cwd(),
+        client: {
+          session: {
+            messages: async ({ path }) => ({ data: messagesBySession[path.id] ?? [] }),
+            prompt: async () => { throw new Error("provider not configured"); },
+            abort: async () => ({ data: true })
+          },
+          tui: { showToast: async () => ({ data: true }) }
+        }
+      };
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      const exhaustedEntry = failoverEventLog.find((e) => e.includes("[EXHAUSTED]") && e.includes(sessionID.slice(0, 16)));
+      expect(exhaustedEntry).toBeDefined();
+      expect(exhaustedEntry).toContain("tier=opus");
+    });
+
+    test("logs MANUAL event for manual failover via tool", async () => {
+      const sessionID = "s-log-manual";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-log-manual",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6",
+            text: "continue work"
+          })
+        ]
+      };
+      const { ctx } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.tool.failover_now.execute({}, makeToolContext(sessionID));
+
+      const manualEntry = failoverEventLog.find((e) => e.includes("[MANUAL]") && e.includes(sessionID.slice(0, 16)));
+      expect(manualEntry).toBeDefined();
+      expect(manualEntry).toContain("to=amazon-bedrock/us.anthropic.claude-opus-4-6-v1");
+    });
+
+    test("writes log entries to failover.log file on disk", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const logPath = settingsPath.replace("settings.json", "failover.log");
+        const sessionID = "s-log-file";
+        const messagesBySession = {
+          [sessionID]: [
+            makeUserMessage(sessionID, {
+              id: "u-log-file",
+              agent: "sisyphus",
+              providerID: "anthropic",
+              modelID: "claude-opus-4-6"
+            }),
+            makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+          ]
+        };
+        const { ctx } = createContext(messagesBySession);
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.event({
+          event: {
+            type: "message.updated",
+            properties: { info: messagesBySession[sessionID][1].info }
+          }
+        });
+        await hooks.event({
+          event: { type: "session.idle", properties: { sessionID } }
+        });
+
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(existsSync(logPath)).toBe(true);
+        const content = readFileSync(logPath, "utf8");
+        expect(content).toContain("[TRIGGER]");
+        expect(content).toContain("[DISPATCH]");
+        expect(content).toContain("[DISPATCH_OK]");
+        expect(content.split("\n").filter(Boolean).length).toBeGreaterThanOrEqual(3);
+      });
+    });
+
+    test("failover_status includes recent log entries", async () => {
+      const sessionID = "s-log-status";
+      const messagesBySession = {
+        [sessionID]: [
+          makeUserMessage(sessionID, {
+            id: "u-log-status",
+            agent: "sisyphus",
+            providerID: "anthropic",
+            modelID: "claude-opus-4-6"
+          }),
+          makeAssistantErrorMessage(sessionID, "anthropic", "claude-opus-4-6", "insufficient_quota")
+        ]
+      };
+      const { ctx } = createContext(messagesBySession);
+      const hooks = await quotaFailoverPlugin(ctx);
+
+      await hooks.event({
+        event: {
+          type: "message.updated",
+          properties: { info: messagesBySession[sessionID][1].info }
+        }
+      });
+      await hooks.event({
+        event: { type: "session.idle", properties: { sessionID } }
+      });
+
+      const report = await hooks.tool.failover_status.execute(
+        { sessionID },
+        makeToolContext(sessionID)
+      );
+
+      expect(report).toContain("Recent events");
+      expect(report).toContain("[TRIGGER]");
+      expect(report).toContain("[DISPATCH_OK]");
+      expect(report).toContain("Log file:");
     });
   });
 
