@@ -2,60 +2,15 @@ import { tool } from "@opencode-ai/plugin";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { availableModelsForProvider, defaultTierMapForProvider, buildDefaultProviderTierMatrix, inferTierFromModelID, estimateContextWindow, getModelNotes, buildAvailableModelsByProvider } from './src/catalog-lookups.js';
 
 const DEFAULT_TIER = null;
-const BEDROCK_MODEL_BY_TIER = {
-  opus: "us.anthropic.claude-opus-4-6-v1",
-  sonnet: "us.anthropic.claude-sonnet-4-6",
-  haiku: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-};
-const OPENAI_MODEL_BY_TIER = {
-  opus: "gpt-5.4",
-  sonnet: "gpt-5.3-codex",
-  haiku: "gpt-5.2-codex",
-};
-const ANTHROPIC_MODEL_BY_TIER = {
-  opus: "claude-opus-4-6",
-  sonnet: "claude-sonnet-4-6",
-  haiku: "claude-haiku-4-5",
-};
-const BEDROCK_AVAILABLE_MODELS = [
-  "us.anthropic.claude-opus-4-6-v1",
-  "us.anthropic.claude-sonnet-4-6",
-  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-  "moonshotai.kimi-k2.5",
-  "moonshot.kimi-k2-thinking",
-];
-const OPENAI_AVAILABLE_MODELS = [
-  "gpt-5.4",
-  "gpt-5.3-codex",
-  "gpt-5.3-codex-spark",
-  "gpt-5.2",
-  "gpt-5.2-codex",
-  "gpt-5.1-codex-max",
-  "gpt-5.1-codex",
-  "gpt-5.1-codex-mini",
-  "gpt-5-codex",
-  "codex-mini-latest",
-];
-const ANTHROPIC_AVAILABLE_MODELS = [
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
-];
 const DEFAULT_PROVIDER_CHAIN = ["amazon-bedrock", "openai"];
 const KNOWN_PROVIDER_IDS = ["amazon-bedrock", "openai", "anthropic"];
 const KNOWN_TIERS = ["opus", "sonnet", "haiku"];
-const DEFAULT_MODEL_BY_PROVIDER_AND_TIER = {
-  "amazon-bedrock": BEDROCK_MODEL_BY_TIER,
-  openai: OPENAI_MODEL_BY_TIER,
-  anthropic: ANTHROPIC_MODEL_BY_TIER,
-};
-const AVAILABLE_MODEL_IDS_BY_PROVIDER = {
-  "amazon-bedrock": BEDROCK_AVAILABLE_MODELS,
-  openai: OPENAI_AVAILABLE_MODELS,
-  anthropic: ANTHROPIC_AVAILABLE_MODELS,
-};
+const DEFAULT_MODEL_BY_PROVIDER_AND_TIER = buildDefaultProviderTierMatrix();
+let AVAILABLE_MODEL_IDS_BY_PROVIDER = buildAvailableModelsByProvider();
+let customModels = [];
 
 const pendingBySession = new Map();
 const attemptedTargetsBySession = new Map();
@@ -139,11 +94,106 @@ function resetRuntimeSettings() {
   runtimeSettings.stallWatchdogEnabled = false;
   runtimeSettings.globalCooldownMs = 60 * 1000;
   runtimeSettings.minRetryBackoffMs = 30 * 60 * 1000;
+  customModels = [];
+  AVAILABLE_MODEL_IDS_BY_PROVIDER = buildAvailableModelsByProvider();
   lastGlobalFailoverAt = 0;
   lastGlobalFailoverSession = null;
   failoverEventLog.length = 0;
   providerHealth.clear();
   bounceCountBySession.clear();
+}
+
+function availableModelIDsForProvider(providerID) {
+  const runtimeModels = AVAILABLE_MODEL_IDS_BY_PROVIDER?.[providerID];
+  if (Array.isArray(runtimeModels) && runtimeModels.length > 0) {
+    return [...runtimeModels];
+  }
+  return [...availableModelsForProvider(providerID)];
+}
+
+function addModelToProviderCatalog(providerID, modelID) {
+  if (!KNOWN_PROVIDER_IDS.includes(providerID)) {
+    return;
+  }
+
+  const normalized = modelID?.trim();
+  if (!normalized) {
+    return;
+  }
+
+  if (!Array.isArray(AVAILABLE_MODEL_IDS_BY_PROVIDER[providerID])) {
+    AVAILABLE_MODEL_IDS_BY_PROVIDER[providerID] = [
+      ...availableModelsForProvider(providerID),
+    ];
+  }
+
+  const providerModels = AVAILABLE_MODEL_IDS_BY_PROVIDER[providerID];
+  const lower = normalized.toLowerCase();
+  const exists = providerModels.some(
+    (candidate) => candidate.toLowerCase() === lower,
+  );
+  if (!exists) {
+    providerModels.push(normalized);
+  }
+}
+
+function normalizeCustomModelEntry(entry) {
+  const provider = entry?.provider;
+  if (!KNOWN_PROVIDER_IDS.includes(provider)) {
+    return null;
+  }
+
+  const modelID = entry?.modelID?.trim();
+  if (!modelID) {
+    return null;
+  }
+
+  const tier = entry?.tier;
+  if (!KNOWN_TIERS.includes(tier)) {
+    return null;
+  }
+
+  const normalized = {
+    provider,
+    modelID,
+    tier,
+    isDefault: entry?.isDefault === true,
+  };
+
+  if (Number.isFinite(entry?.contextWindow)) {
+    normalized.contextWindow = Math.max(1, Math.round(entry.contextWindow));
+  }
+
+  return normalized;
+}
+
+function sameCustomModelKey(left, right) {
+  return (
+    left?.provider === right?.provider &&
+    left?.modelID?.toLowerCase() === right?.modelID?.toLowerCase()
+  );
+}
+
+function findCustomModel(providerID, modelID) {
+  const normalized = modelID?.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (providerID) {
+    return (
+      customModels.find(
+        (entry) =>
+          entry.provider === providerID &&
+          entry.modelID.toLowerCase() === normalized,
+      ) ?? null
+    );
+  }
+
+  return (
+    customModels.find((entry) => entry.modelID.toLowerCase() === normalized) ??
+    null
+  );
 }
 
 function logPathForRuntime() {
@@ -180,6 +230,30 @@ async function loadRuntimeSettings(path) {
   try {
     const raw = await readFile(path, "utf8");
     const parsed = JSON.parse(raw);
+
+    customModels = [];
+    if (Array.isArray(parsed?.customModels)) {
+      for (const candidate of parsed.customModels) {
+        const normalized = normalizeCustomModelEntry(candidate);
+        if (!normalized) {
+          continue;
+        }
+
+        const existingIndex = customModels.findIndex((entry) =>
+          sameCustomModelKey(entry, normalized),
+        );
+        if (existingIndex >= 0) {
+          customModels[existingIndex] = normalized;
+        } else {
+          customModels.push(normalized);
+        }
+      }
+    }
+
+    for (const customModel of customModels) {
+      addModelToProviderCatalog(customModel.provider, customModel.modelID);
+    }
+
     const providerChain = normalizeProviderList(parsed?.providerChain);
     if (providerChain.length > 0) {
       runtimeSettings.providerChain = providerChain;
@@ -239,6 +313,7 @@ async function saveRuntimeSettings(path) {
   const payload = {
     providerChain: runtimeSettings.providerChain,
     modelByProviderAndTier: runtimeSettings.modelByProviderAndTier,
+    customModels,
     debugToasts: runtimeSettings.debugToasts,
     stallWatchdogMs: runtimeSettings.stallWatchdogMs,
     stallWatchdogEnabled: runtimeSettings.stallWatchdogEnabled,
@@ -279,21 +354,33 @@ function providerChainSummary() {
   return runtimeSettings.providerChain.join(" -> ");
 }
 
-function availableModelsForProvider(providerID) {
-  return AVAILABLE_MODEL_IDS_BY_PROVIDER[providerID] ?? [];
-}
-
 function canonicalModelID(providerID, modelID) {
   const normalized = modelID?.trim().toLowerCase();
   if (!normalized) {
     return null;
   }
 
-  const available = availableModelsForProvider(providerID);
+  const available = availableModelIDsForProvider(providerID);
   return (
     available.find((candidate) => candidate.toLowerCase() === normalized) ??
     null
   );
+}
+
+function getSelectionWarningNotes(providerID, modelID) {
+  const catalogNotes = getModelNotes(providerID, modelID);
+  if (catalogNotes) {
+    return catalogNotes;
+  }
+
+  if (providerID === "amazon-bedrock" && modelID === "moonshotai.kimi-k2.5") {
+    return [
+      "Warning: moonshotai.kimi-k2.5 can have long first-token latency in tool-heavy sessions.",
+      "Tip: try moonshot.kimi-k2-thinking for faster/stabler interactive tool use.",
+    ].join("\n");
+  }
+
+  return undefined;
 }
 
 function getModelForProviderTier(providerID, tier) {
@@ -323,7 +410,7 @@ function buildModelCatalogReport(providerID) {
   for (const id of providers) {
     lines.push(`Provider: ${id}`);
     lines.push("Available models:");
-    for (const modelID of availableModelsForProvider(id)) {
+    for (const modelID of availableModelIDsForProvider(id)) {
       lines.push(`- ${modelID}`);
     }
     lines.push("Active tier mapping:");
@@ -626,45 +713,16 @@ function getAttemptedTargets(sessionID, userMessageID) {
 }
 
 function inferTierFromModel(model) {
-  const modelID = model?.modelID?.toLowerCase() ?? "";
-  if (!modelID) {
-    return null;
+  const providerID = model?.providerID;
+  const modelID = model?.modelID ?? "";
+  if (!modelID) return null;
+
+  const custom = findCustomModel(providerID, modelID);
+  if (custom?.tier) {
+    return custom.tier;
   }
 
-  if (
-    modelID.includes("claude-opus-4-6") ||
-    modelID.includes("claude-opus") ||
-    modelID.includes("gpt-5.4") ||
-    modelID.includes("gpt-5-codex") ||
-    modelID.includes("gpt-5.1-codex-max")
-  ) {
-    return "opus";
-  }
-
-  if (
-    modelID.includes("claude-sonnet-4-6") ||
-    modelID.includes("claude-sonnet") ||
-    modelID.includes("gpt-5.3-codex") ||
-    modelID.includes("gpt-5.3-codex-spark") ||
-    modelID.includes("gpt-5.2-codex") ||
-    modelID.includes("gpt-5.2") ||
-    modelID.includes("gpt-5.1-codex") ||
-    modelID.includes("gpt-5.1") ||
-    modelID.includes("kimi-k2.5") ||
-    modelID.includes("kimi")
-  ) {
-    return "sonnet";
-  }
-
-  if (
-    modelID.includes("claude-haiku-4-5") ||
-    modelID.includes("claude-haiku") ||
-    modelID.includes("codex-mini")
-  ) {
-    return "haiku";
-  }
-
-  return null;
+  return inferTierFromModelID(modelID);
 }
 
 function buildFallbackChain(modelTierHint) {
@@ -1145,32 +1203,14 @@ function formatMs(value) {
 }
 
 function estimateModelContextLimit(modelID) {
-  const id = (modelID ?? "").toLowerCase();
-  if (!id) {
-    return undefined;
+  if (!modelID) return undefined;
+
+  const custom = findCustomModel(undefined, modelID);
+  if (Number.isFinite(custom?.contextWindow)) {
+    return custom.contextWindow;
   }
 
-  if (id.includes("gpt-5.4")) {
-    return 1050000;
-  }
-
-  if (
-    id.includes("gpt-5.3") ||
-    id.includes("gpt-5.2") ||
-    id.includes("gpt-5.1-codex-max")
-  ) {
-    return 272000;
-  }
-
-  if (
-    id.includes("claude-opus-4-6") ||
-    id.includes("claude-sonnet-4-6") ||
-    id.includes("claude-haiku-4-5")
-  ) {
-    return 200000;
-  }
-
-  return undefined;
+  return estimateContextWindow(modelID);
 }
 
 async function showDebugTriggerToast(ctx, sessionID, source, note) {
@@ -1916,7 +1956,7 @@ export default async function quotaFailoverPlugin(ctx) {
             return [
               `Unknown model for provider ${providerID}: ${args.modelID}`,
               "Available models:",
-              ...availableModelsForProvider(providerID).map((id) => `- ${id}`),
+              ...availableModelIDsForProvider(providerID).map((id) => `- ${id}`),
             ].join("\n");
           }
 
@@ -1943,16 +1983,9 @@ export default async function quotaFailoverPlugin(ctx) {
           await saveRuntimeSettings(settingsPath).catch(() => {});
 
           const warnings = [];
-          if (
-            providerID === "amazon-bedrock" &&
-            modelID === "moonshotai.kimi-k2.5"
-          ) {
-            warnings.push(
-              "Warning: moonshotai.kimi-k2.5 can have long first-token latency in tool-heavy sessions.",
-            );
-            warnings.push(
-              "Tip: try moonshot.kimi-k2-thinking for faster/stabler interactive tool use.",
-            );
+          const modelNotes = getSelectionWarningNotes(providerID, modelID);
+          if (modelNotes) {
+            warnings.push(...modelNotes.split("\n").filter(Boolean));
           }
 
           return [
@@ -1963,6 +1996,84 @@ export default async function quotaFailoverPlugin(ctx) {
             "",
             "Tier mappings:",
             fallbackSummaryByTier(),
+          ].join("\n");
+        },
+      }),
+      failover_add_model: tool({
+        description: "Register a custom model for use in failover chain.",
+        args: {
+          provider: tool.schema
+            .enum(["amazon-bedrock", "openai", "anthropic"])
+            .describe("Provider ID"),
+          modelID: tool.schema.string().min(1).describe("Model ID string"),
+          tier: tool.schema
+            .enum(["opus", "sonnet", "haiku"])
+            .describe("Performance tier"),
+          contextWindow: tool.schema
+            .number()
+            .optional()
+            .describe("Token context window size"),
+          setDefault: tool.schema
+            .boolean()
+            .optional()
+            .describe("Make this the default for provider+tier"),
+        },
+        async execute(args) {
+          const providerID = args.provider;
+          const modelID = args.modelID.trim();
+          const tier = args.tier;
+          const setDefault = args.setDefault === true;
+
+          const normalized = normalizeCustomModelEntry({
+            provider: providerID,
+            modelID,
+            tier,
+            contextWindow: args.contextWindow,
+            isDefault: setDefault,
+          });
+
+          if (!normalized) {
+            return "Invalid custom model payload. Ensure provider, modelID, and tier are valid.";
+          }
+
+          const existingIndex = customModels.findIndex((entry) =>
+            sameCustomModelKey(entry, normalized),
+          );
+          if (existingIndex >= 0) {
+            customModels[existingIndex] = normalized;
+          } else {
+            customModels.push(normalized);
+          }
+
+          addModelToProviderCatalog(providerID, modelID);
+
+          if (setDefault) {
+            if (!runtimeSettings.modelByProviderAndTier[providerID]) {
+              runtimeSettings.modelByProviderAndTier[providerID] = {};
+            }
+            runtimeSettings.modelByProviderAndTier[providerID][tier] = modelID;
+          }
+
+          await saveRuntimeSettings(settingsPath).catch(() => {});
+
+          const details = [
+            `Custom model registered: ${providerID}/${modelID}`,
+            `Tier: ${tier}`,
+          ];
+          if (Number.isFinite(normalized.contextWindow)) {
+            details.push(`Context window: ${normalized.contextWindow}`);
+          }
+          if (setDefault) {
+            details.push(
+              `Default updated: ${providerID}/${tier} -> ${modelID}`,
+            );
+          }
+
+          return [
+            ...details,
+            "",
+            "Active tier mapping:",
+            providerTierSummary(providerID),
           ].join("\n");
         },
       }),

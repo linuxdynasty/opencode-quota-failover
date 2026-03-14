@@ -3175,6 +3175,211 @@ describe("opencode-quota-failover", () => {
       const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
       expect(saved.modelByProviderAndTier["amazon-bedrock"].sonnet).toBe("moonshot.kimi-k2-thinking");
     });
+
+    describe("failover_add_model", () => {
+      test("registers a custom model and shows it in failover_list_models", async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_add_model.execute(
+          {
+            provider: "openai",
+            modelID: "gpt-6-custom-alpha",
+            tier: "opus",
+            contextWindow: 777777
+          },
+          makeToolContext("tool-add-model-list")
+        );
+
+        const report = await hooks.tool.failover_list_models.execute(
+          { provider: "openai" },
+          makeToolContext("tool-add-model-list")
+        );
+
+        expect(report).toContain("Provider: openai");
+        expect(report).toContain("gpt-6-custom-alpha");
+      });
+
+      test("registered custom model can be selected via failover_set_model", async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_add_model.execute(
+          {
+            provider: "openai",
+            modelID: "gpt-6-custom-sonnet",
+            tier: "sonnet"
+          },
+          makeToolContext("tool-add-model-set")
+        );
+
+        const result = await hooks.tool.failover_set_model.execute(
+          {
+            provider: "openai",
+            modelID: "gpt-6-custom-sonnet",
+            tier: "sonnet"
+          },
+          makeToolContext("tool-add-model-set")
+        );
+
+        expect(result).toContain("Failover model updated for openai.");
+
+        const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
+        expect(saved.modelByProviderAndTier.openai.sonnet).toBe("gpt-6-custom-sonnet");
+      });
+
+      test("custom model persists under customModels in settings.json", async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_add_model.execute(
+          {
+            provider: "anthropic",
+            modelID: "claude-sonnet-9-custom",
+            tier: "sonnet",
+            contextWindow: 333333
+          },
+          makeToolContext("tool-add-model-persist")
+        );
+
+        const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
+        const added = (saved.customModels ?? []).find(
+          (entry) =>
+            entry.provider === "anthropic" && entry.modelID === "claude-sonnet-9-custom"
+        );
+
+        expect(Array.isArray(saved.customModels)).toBe(true);
+        expect(added).toEqual({
+          provider: "anthropic",
+          modelID: "claude-sonnet-9-custom",
+          tier: "sonnet",
+          contextWindow: 333333,
+          isDefault: false
+        });
+      });
+
+      test("duplicate custom model registration does not create duplicates", async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_add_model.execute(
+          {
+            provider: "openai",
+            modelID: "gpt-6-dedupe",
+            tier: "haiku"
+          },
+          makeToolContext("tool-add-model-dedupe")
+        );
+
+        await hooks.tool.failover_add_model.execute(
+          {
+            provider: "openai",
+            modelID: "gpt-6-dedupe",
+            tier: "haiku"
+          },
+          makeToolContext("tool-add-model-dedupe")
+        );
+
+        const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
+        const matches = (saved.customModels ?? []).filter(
+          (entry) => entry.provider === "openai" && entry.modelID === "gpt-6-dedupe"
+        );
+        expect(matches).toHaveLength(1);
+
+        const report = await hooks.tool.failover_list_models.execute(
+          { provider: "openai" },
+          makeToolContext("tool-add-model-dedupe")
+        );
+        const occurrences = report.split("gpt-6-dedupe").length - 1;
+        expect(occurrences).toBe(1);
+      });
+
+      test("setDefault=true updates provider tier mapping", async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_add_model.execute(
+          {
+            provider: "amazon-bedrock",
+            modelID: "us.custom.bedrock-opus-x",
+            tier: "opus",
+            setDefault: true
+          },
+          makeToolContext("tool-add-model-default")
+        );
+
+        const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
+        expect(saved.modelByProviderAndTier["amazon-bedrock"].opus).toBe("us.custom.bedrock-opus-x");
+
+        const entry = (saved.customModels ?? []).find(
+          (item) => item.provider === "amazon-bedrock" && item.modelID === "us.custom.bedrock-opus-x"
+        );
+        expect(entry?.isDefault).toBe(true);
+      });
+
+      test("custom tier is inferred by failover_set_model when tier argument is omitted", async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_add_model.execute(
+          {
+            provider: "openai",
+            modelID: "gpt-6-infer-sonnet",
+            tier: "sonnet"
+          },
+          makeToolContext("tool-add-model-infer")
+        );
+
+        const result = await hooks.tool.failover_set_model.execute(
+          {
+            provider: "openai",
+            modelID: "gpt-6-infer-sonnet"
+          },
+          makeToolContext("tool-add-model-infer")
+        );
+
+        expect(result).toContain("Updated tiers: sonnet");
+
+        const saved = JSON.parse(readFileSync(TEST_SETTINGS_PATH, "utf8"));
+        expect(saved.modelByProviderAndTier.openai.sonnet).toBe("gpt-6-infer-sonnet");
+      });
+
+      test("custom models survive plugin reload", async () => {
+        await withTempSettings(async () => {
+          const { ctx } = createContext({});
+          const hooks = await quotaFailoverPlugin(ctx);
+
+          await hooks.tool.failover_add_model.execute(
+            {
+              provider: "openai",
+              modelID: "gpt-6-reload",
+              tier: "opus",
+              contextWindow: 888888
+            },
+            makeToolContext("tool-add-model-reload")
+          );
+
+          const { ctx: ctxReloaded } = createContext({});
+          const hooksReloaded = await quotaFailoverPlugin(ctxReloaded);
+
+          const report = await hooksReloaded.tool.failover_list_models.execute(
+            { provider: "openai" },
+            makeToolContext("tool-add-model-reload")
+          );
+          expect(report).toContain("gpt-6-reload");
+
+          const setResult = await hooksReloaded.tool.failover_set_model.execute(
+            {
+              provider: "openai",
+              modelID: "gpt-6-reload",
+              tier: "opus"
+            },
+            makeToolContext("tool-add-model-reload")
+          );
+          expect(setResult).toContain("Failover model updated for openai.");
+        });
+      });
+    });
   });
 
 });
