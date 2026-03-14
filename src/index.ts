@@ -2,6 +2,8 @@ import {
   isUsageLimitError,
   isDefinitiveQuotaError,
   isAmbiguousRateLimitSignal,
+  isProviderRequestError,
+  shouldTriggerFailover,
 } from './detection.js';
 import {
   createChatMessageHandler,
@@ -12,7 +14,7 @@ import { loadRuntimeSettings, settingsPathForRuntime } from './settings.js';
 import { failoverEventLog, resetRuntimeSettings } from './state.js';
 import { createTools } from './tools.js';
 
-export { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal };
+export { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, shouldTriggerFailover };
 export { failoverEventLog };
 
 /** quotaFailoverPlugin does initialize runtime settings and bind plugin handlers. */

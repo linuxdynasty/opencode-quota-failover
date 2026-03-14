@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, failoverEventLog } from "./index.js";
+import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, shouldTriggerFailover, failoverEventLog } from "./index.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -1849,6 +1849,268 @@ describe("opencode-quota-failover", () => {
     test("returns false for too many requests", () => {
       expect(isAmbiguousRateLimitSignal({ message: "too many requests" })).toBe(false);
     });
+  });
+
+  describe("isProviderRequestError - provider request validation failures", () => {
+    // POSITIVE: MUST return true
+    test("returns true for exact observed Bedrock invalid JSON body error", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: The request body is not valid JSON."
+      })).toBe(true);
+    });
+
+    test("returns true for string-form error with undefined: prefix (production shape)", () => {
+      expect(isProviderRequestError(
+        "undefined: The model returned the following errors: The request body is not valid JSON."
+      )).toBe(true);
+    });
+
+    test("returns true when error is in nested data.message", () => {
+      expect(isProviderRequestError({
+        data: { message: "The model returned the following errors: The request body is not valid JSON." }
+      })).toBe(true);
+    });
+
+    test("returns true for nested error.data.message shape", () => {
+      expect(isProviderRequestError({
+        error: {
+          data: { message: "The model returned the following errors: The request body is not valid JSON." }
+        }
+      })).toBe(true);
+    });
+
+    test("returns true for 'invalid request' variant", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: invalid request format detected"
+      })).toBe(true);
+    });
+
+    test("returns true for 'malformed request' variant", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: malformed request body received"
+      })).toBe(true);
+    });
+
+    test("returns true for 'request body' standalone variant", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: request body could not be parsed"
+      })).toBe(true);
+    });
+
+    // NEGATIVE: MUST return false
+    test("returns false for 'not valid json' WITHOUT Bedrock prefix", () => {
+      expect(isProviderRequestError({
+        message: "The request body is not valid JSON."
+      })).toBe(false);
+    });
+
+    test("returns false for Bedrock prefix WITHOUT request error signal", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: some unrelated error occurred"
+      })).toBe(false);
+    });
+
+    test("returns false for thinking-block mutation error (same prefix, different signals)", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified"
+      })).toBe(false);
+    });
+
+    test("returns false for quota error", () => {
+      expect(isProviderRequestError({ message: "insufficient_quota" })).toBe(false);
+    });
+
+    test("returns false for rate limit error", () => {
+      expect(isProviderRequestError({ message: "rate limit exceeded, retry in 30 seconds" })).toBe(false);
+    });
+
+    test("returns false for context length error", () => {
+      expect(isProviderRequestError({ message: "context length exceeded" })).toBe(false);
+    });
+
+    test("returns false for null/undefined/empty inputs", () => {
+      expect(isProviderRequestError(null)).toBe(false);
+      expect(isProviderRequestError(undefined)).toBe(false);
+      expect(isProviderRequestError("")).toBe(false);
+      expect(isProviderRequestError({})).toBe(false);
+    });
+  });
+
+  describe("shouldTriggerFailover - Bedrock provider request errors", () => {
+    const bedrockOpus = { providerID: "amazon-bedrock", modelID: "us.anthropic.claude-opus-4-6-v1" };
+    const bedrockSonnet = { providerID: "amazon-bedrock", modelID: "us.anthropic.claude-sonnet-4-6" };
+    const bedrockHaiku = { providerID: "amazon-bedrock", modelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0" };
+    const anthropicOpus = { providerID: "anthropic", modelID: "claude-opus-4-6" };
+    const openaiOpus = { providerID: "openai", modelID: "gpt-5.4" };
+    const invalidJsonError = { message: "The model returned the following errors: The request body is not valid JSON." };
+
+    test("returns true for Bedrock Opus + invalid JSON body (requireDefinitive=true)", () => {
+      expect(shouldTriggerFailover(invalidJsonError, bedrockOpus, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("returns true for Bedrock Sonnet + invalid JSON body", () => {
+      expect(shouldTriggerFailover(invalidJsonError, bedrockSonnet, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("returns true for Bedrock Haiku + invalid JSON body", () => {
+      expect(shouldTriggerFailover(invalidJsonError, bedrockHaiku, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("returns false for Anthropic + invalid JSON body (not Bedrock)", () => {
+      expect(shouldTriggerFailover(invalidJsonError, anthropicOpus, { requireDefinitive: true })).toBe(false);
+    });
+
+    test("returns false for OpenAI + invalid JSON body (not Bedrock)", () => {
+      expect(shouldTriggerFailover(invalidJsonError, openaiOpus, { requireDefinitive: true })).toBe(false);
+    });
+
+    test("returns false for null model + invalid JSON body", () => {
+      expect(shouldTriggerFailover(invalidJsonError, null, { requireDefinitive: true })).toBe(false);
+    });
+
+    test("returns false for Bedrock + unrelated error", () => {
+      expect(shouldTriggerFailover({ message: "connection timeout" }, bedrockOpus, { requireDefinitive: true })).toBe(false);
+    });
+
+    // Backward compatibility
+    test("still returns true for definitive quota error regardless of provider", () => {
+      expect(shouldTriggerFailover({ message: "insufficient_quota" }, anthropicOpus, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("still returns true for Bedrock Opus + thinking-block mutation error", () => {
+      expect(shouldTriggerFailover(
+        { message: "The model returned the following errors: thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. They must remain as they were in the original response." },
+        bedrockOpus,
+        { requireDefinitive: true }
+      )).toBe(true);
+    });
+
+    test("thinking-block error does NOT trigger for non-Opus Bedrock model", () => {
+      expect(shouldTriggerFailover(
+        { message: "The model returned the following errors: thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. They must remain as they were in the original response." },
+        bedrockSonnet,
+        { requireDefinitive: true }
+      )).toBe(false);
+    });
+  });
+
+  test("message.updated triggers failover for Bedrock invalid JSON body error", async () => {
+    const sessionID = "s-bedrock-invalid-json-msg";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-bedrock-invalid-json-msg",
+          agent: "sisyphus",
+          providerID: "amazon-bedrock",
+          modelID: "us.anthropic.claude-opus-4-6-v1"
+        }),
+        makeAssistantErrorMessage(
+          sessionID,
+          "amazon-bedrock",
+          "us.anthropic.claude-opus-4-6-v1",
+          "The model returned the following errors: The request body is not valid JSON.",
+          400
+        )
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: messagesBySession[sessionID][1].info }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.model.providerID).toBe("openai");
+  });
+
+  test("session.error triggers failover for Bedrock invalid JSON body error", async () => {
+    const sessionID = "s-bedrock-invalid-json-se";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-bedrock-invalid-json-se",
+          providerID: "amazon-bedrock",
+          modelID: "us.anthropic.claude-opus-4-6-v1"
+        })
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    // Record lastAssistantStats so session.error handler can resolve failedModel
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "a-stats-bedrock-json-se",
+            sessionID,
+            role: "assistant",
+            providerID: "amazon-bedrock",
+            modelID: "us.anthropic.claude-opus-4-6-v1",
+            tokens: { input: 1000, output: 0, reasoning: 0 }
+          }
+        }
+      }
+    });
+
+    await hooks.event({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID,
+          error: { message: "The model returned the following errors: The request body is not valid JSON." }
+        }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.model.providerID).toBe("openai");
+  });
+
+  test("message.updated does NOT trigger failover for non-Bedrock provider with same error text", async () => {
+    const sessionID = "s-anthropic-invalid-json-no-fo";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-anthropic-invalid-json-no-fo",
+          agent: "sisyphus",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-6"
+        }),
+        makeAssistantErrorMessage(
+          sessionID,
+          "anthropic",
+          "claude-opus-4-6",
+          "The model returned the following errors: The request body is not valid JSON.",
+          400
+        )
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: messagesBySession[sessionID][1].info }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(0);
   });
 
   test("message.updated does NOT trigger failover for ambiguous 'account rate limit' without backoff", async () => {

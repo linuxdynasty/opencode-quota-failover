@@ -5,5 +5,7 @@ export {
   isUsageLimitError,
   isDefinitiveQuotaError,
   isAmbiguousRateLimitSignal,
+  isProviderRequestError,
+  shouldTriggerFailover,
   failoverEventLog,
 } from './src/index.js';

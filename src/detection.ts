@@ -155,6 +155,11 @@ export function isBedrockOpusModel(model: ProviderModel | null | undefined): boo
   return providerID === 'amazon-bedrock' && modelID.includes('claude-opus-4-6');
 }
 
+/** isBedrockModel does identify any Amazon Bedrock model target for provider-scoped failover gating. */
+export function isBedrockModel(model: ProviderModel | null | undefined): boolean {
+  return model?.providerID === 'amazon-bedrock';
+}
+
 /** isThinkingBlockMutationError does detect immutable thinking-block replay mutation errors. */
 export function isThinkingBlockMutationError(error: unknown): boolean {
   const { text } = collectErrorDetails(error);
@@ -179,6 +184,29 @@ export function isThinkingBlockMutationError(error: unknown): boolean {
   return hits >= 2;
 }
 
+/** isProviderRequestError does detect non-recoverable provider request validation failures. */
+export function isProviderRequestError(error: unknown): boolean {
+  const { text } = collectErrorDetails(error);
+  if (!text) {
+    return false;
+  }
+
+  // Gate 1: Bedrock-style error prefix required — prevents matching generic validation errors
+  if (!text.includes('the model returned the following errors')) {
+    return false;
+  }
+
+  // Gate 2: At least one request-validation signal
+  const requestErrorSignals = [
+    'not valid json',
+    'request body',
+    'invalid request',
+    'malformed request',
+  ];
+
+  return requestErrorSignals.some((signal) => text.includes(signal));
+}
+
 /** shouldTriggerFailover does decide whether a failure signal should initiate failover dispatch. */
 export function shouldTriggerFailover(
   error: unknown,
@@ -192,7 +220,15 @@ export function shouldTriggerFailover(
     return true;
   }
 
-  return isBedrockOpusModel(failedModel) && isThinkingBlockMutationError(error);
+  if (isBedrockOpusModel(failedModel) && isThinkingBlockMutationError(error)) {
+    return true;
+  }
+
+  if (isBedrockModel(failedModel) && isProviderRequestError(error)) {
+    return true;
+  }
+
+  return false;
 }
 
 /** parseRetryBackoffMs does parse retry-in durations into milliseconds from provider message text. */
