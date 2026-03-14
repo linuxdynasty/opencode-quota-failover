@@ -1,0 +1,23 @@
+index.test.js
+  413dfb2bba6c3281 447-490
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "1b9b946801d5ea2918e30a1a1785ad43ce51d7fc",
+  "prompts": {
+    "413dfb2bba6c3281": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_316080419ffedxegVFAEdgnh1L-3d8dd5b6-819f-40b8-b004-0e7eef6d5ab9",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 44,
+      "total_deletions": 0,
+      "accepted_lines": 44,
+      "overriden_lines": 0
+    }
+  }
+}
