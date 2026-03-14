@@ -1,0 +1,23 @@
+src/constants.ts
+  979ebc5fce0a136f 1-10,12-17,19-24,26-33,35-39,41-46,48-58,60,64-67,71-75,77-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.11",
+  "base_commit_sha": "a692e1b3cdd382cbfad1e035d999903097d25c92",
+  "prompts": {
+    "979ebc5fce0a136f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_3160f8041ffeRY6lsojJ0Sjqbq-221dd732-a098-40b3-8e33-531cc887c3f3",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 81,
+      "total_deletions": 21,
+      "accepted_lines": 74,
+      "overriden_lines": 0
+    }
+  }
+}
