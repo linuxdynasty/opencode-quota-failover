@@ -22,6 +22,7 @@ The plugin distinguishes real quota exhaustion from transient rate limits. Short
 - Tier-aware model mapping — opus/sonnet/haiku tiers are preserved across providers
 - Global cooldown prevents cascade failovers across concurrent subagent sessions
 - Manual failover via MCP tools when you want direct control
+- Exact dispatch-failure diagnostics in toasts (`Reason`, `Category`, `Hint`) for faster debugging
 - All settings persisted to disk; no re-configuration on restart
 - 96 tests, 0 failures
 
@@ -267,6 +268,20 @@ A transient rate limit may be matching an ambiguous signal pattern. Enable `debu
 **"No fallback available" or failover loops**
 
 Your provider chain is exhausted. All configured providers have hit their quota or are unreachable. Add more providers to `providerChain` or wait for quota to reset on one of the existing providers.
+
+**OpenAI failover dispatch fails immediately**
+
+If failover to OpenAI fails right away, check the **Failover Dispatch Error** toast. It now includes:
+
+- `Reason`: the exact provider error (including status/message)
+- `Category`: `auth_config`, `quota`, `transient`, or `unknown`
+- `Hint`: provider-specific next action
+
+For OpenAI specifically, being logged into ChatGPT does **not** authenticate OpenAI API usage in OpenCode. Use a valid OpenAI API key/token with billing enabled, then re-authenticate with:
+
+```bash
+opencode auth login openai
+```
 
 **Settings changes aren't taking effect**
 
