@@ -1,0 +1,29 @@
+{
+  "providerChain": [
+    "openai",
+    "amazon-bedrock"
+  ],
+  "modelByProviderAndTier": {
+    "amazon-bedrock": {
+      "opus": "us.anthropic.claude-opus-4-6-v1",
+      "sonnet": "us.anthropic.claude-sonnet-4-6",
+      "haiku": "us.anthropic.claude-sonnet-4-6"
+    },
+    "openai": {
+      "opus": "gpt-5.3-codex",
+      "sonnet": "gpt-5.2-codex",
+      "haiku": "gpt-5.2-codex"
+    },
+    "anthropic": {
+      "opus": "claude-opus-4-6",
+      "sonnet": "claude-sonnet-4-6",
+      "haiku": "claude-sonnet-4-6"
+    }
+  },
+  "debugToasts": true,
+  "stallWatchdogMs": 45000,
+  "stallWatchdogEnabled": false,
+  "globalCooldownMs": 60000,
+  "minRetryBackoffMs": 1800000,
+  "updatedAt": "2026-02-26T21:33:34Z"
+}
