@@ -16,20 +16,43 @@ opencode models anthropic
 
 Only models returned by `opencode models <provider>` are valid dispatch targets. If a model ID is not in that list, failover dispatch will fail silently.
 
-## Architecture (single file)
+## Architecture (15-module TypeScript)
 
-All logic lives in `index.js`. Key constants at the top of the file:
+The plugin is split into 15 focused modules under `src/`. The root `index.js` is a 9-line re-export bridge compiled from `src/index.ts`.
 
-| Constant | Purpose |
-|---|---|
-| `<PROVIDER>_AVAILABLE_MODELS` | Allowlist of model IDs the plugin accepts per provider |
-| `<PROVIDER>_MODEL_BY_TIER` | Default tier mapping (opus/sonnet/haiku → model ID) |
-| `inferTierFromModel()` | Classifies any model ID into a tier for fallback routing |
-| `estimateModelContextLimit()` | Returns token context window size for headroom estimates |
+| Module | Purpose |
+|--------|---------|
+| `src/catalog.ts` | Single source of truth for all model definitions. Add new models here. |
+| `src/catalog-lookups.ts` | Data-driven queries derived from the catalog: available models, tier maps, context windows |
+| `src/types.ts` | Shared TypeScript types (KnownProviderID, KnownTier, RuntimeSettings, etc.) |
+| `src/constants.ts` | Plugin-wide constants: provider IDs, tiers, default chain, cooldown/watchdog defaults |
+| `src/state.ts` | In-process runtime state: session maps, cooldown timestamps, watchdog handles |
+| `src/settings.ts` | Disk persistence for `settings.json`; `loadRuntimeSettings`, `saveRuntimeSettings` |
+| `src/models.ts` | Model selection: `inferTierFromModel`, `pickFallback`, `buildFallbackChain`, `estimateModelContextLimit` |
+| `src/detection.ts` | Quota signal detection: `isDefinitiveQuotaError`, `isAmbiguousRateLimitSignal`, `isUsageLimitError` |
+| `src/failover.ts` | Core failover: `queueFailover`, `processFailover`, replay message to fallback provider |
+| `src/handlers.ts` | OpenCode event handlers for `message.updated`, `session.status`, `session.error`, etc. |
+| `src/messages.ts` | Message part normalization and user-message extraction for replay |
+| `src/reporting.ts` | Toast formatting, `buildStatusReport`, failover event log |
+| `src/tools.ts` | MCP tool definitions (`failover_status`, `failover_now`, `failover_set_model`, etc.) |
+| `src/watchdog.ts` | Stall watchdog timer: fires failover if session idles too long |
+| `src/index.ts` | Plugin entry point: wires handlers and tools, re-exports detection functions |
+
+### Which module to read for a given task
+
+- **Add/change a model**: `src/catalog.ts` only
+- **Change tier inference**: `src/catalog.ts` (`tierPatterns` field on each model)
+- **Change context window estimate**: `src/catalog.ts` (`contextWindow` field)
+- **Change failover trigger conditions**: `src/detection.ts`
+- **Change failover dispatch logic**: `src/failover.ts`
+- **Add/change an MCP tool**: `src/tools.ts`
+- **Change toast or status output**: `src/reporting.ts`
+- **Change settings schema**: `src/types.ts` (RuntimeSettings interface) + `src/settings.ts`
+- **Change default provider chain**: `src/constants.ts`
 
 ## How to Add a New Model
 
-All changes are in `index.js` (and corresponding test assertions in `index.test.js`).
+All model data lives in `src/catalog.ts` — add a `ModelDefinition` entry to `MODEL_CATALOG`. Everything else is derived automatically.
 
 ### Step 1 — Verify the model exists
 
@@ -39,68 +62,50 @@ opencode models <provider>
 
 Use the exact model ID string from that output.
 
-### Step 2 — Add to the available models list
+### Step 2 — Add to MODEL_CATALOG in src/catalog.ts
 
-Add the model ID to the appropriate `*_AVAILABLE_MODELS` array (top of `index.js`):
-
-```javascript
-const OPENAI_AVAILABLE_MODELS = [
-  "gpt-5.4",        // ← add new models here
-  "gpt-5.3-codex",
-  // ...
-];
+```typescript
+{
+  id: 'gpt-5.4',
+  provider: 'openai',
+  tier: 'opus',
+  isDefault: true,
+  contextWindow: 1050000,
+  tierPatterns: ['gpt-5.4'],
+},
 ```
 
-### Step 3 — Set the tier mapping (if it should be a default)
+Key fields:
+- `id`: exact model ID as returned by `opencode models <provider>`
+- `provider`: `'anthropic'` | `'amazon-bedrock'` | `'openai'`
+- `tier`: `'opus'` | `'sonnet'` | `'haiku'`
+- `isDefault`: `true` if this should be the default model for this provider+tier
+- `contextWindow`: token limit (optional but recommended)
+- `tierPatterns`: substrings used by `inferTierFromModel()` to classify this model
 
-Update the `*_MODEL_BY_TIER` object if this model should be the default for a tier:
+**Watch for substring collisions** — longer, more specific patterns must come before shorter ones because the catalog uses longest-pattern-first matching. Put `'gpt-5.3-codex'` before `'gpt-5.3'` if both exist.
 
-```javascript
-const OPENAI_MODEL_BY_TIER = {
-  opus: "gpt-5.4",       // ← flagship
-  sonnet: "gpt-5.3-codex",
-  haiku: "gpt-5.2-codex",
-};
-```
-
-### Step 4 — Update tier inference
-
-In `inferTierFromModel()`, add a `modelID.includes(...)` check so the plugin can classify the model when it appears in error/status messages:
-
-```javascript
-// opus tier
-if (modelID.includes("gpt-5.4") || ...) { return "opus"; }
-
-// sonnet tier
-if (modelID.includes("gpt-5.3-codex") || ...) { return "sonnet"; }
-
-// haiku tier
-if (modelID.includes("codex-mini") || ...) { return "haiku"; }
-```
-
-**Watch for substring collisions** — `"gpt-5.3"` matches both `gpt-5.3-codex` and `gpt-5.3-codex-spark`. Put more specific patterns first or use the full suffix.
-
-### Step 5 — Update context limit (if known)
-
-In `estimateModelContextLimit()`, add the token limit:
-
-```javascript
-if (id.includes("gpt-5.4")) { return 1050000; }
-```
-
-### Step 6 — Update tests
-
-In `index.test.js`, update:
-- `writeDefaultTestSettings()` (line ~23) — the test baseline tier mapping
-- Any assertions that hard-code model IDs in dispatch expectations
-
-### Step 7 — Run tests
+### Step 3 — Run tests
 
 ```bash
 bun test
 ```
 
-All 110 tests must pass.
+Catalog parity tests in `src/catalog.test.ts` will catch missing fields, duplicate defaults, or broken tier patterns. All 151 tests must pass.
+
+## How to Run Tests
+
+```bash
+# Run all tests (both test files)
+bun test
+
+# Type-check without running tests
+bunx tsc --noEmit
+```
+
+Two test files:
+- `index.test.js` — end-to-end plugin behavior, failover flow, MCP tools, settings
+- `src/catalog.test.ts` — catalog parity: tier coverage, default uniqueness, pattern validity
 
 ## Runtime Settings
 
@@ -109,10 +114,11 @@ Persisted at `~/.config/opencode/plugins/opencode-quota-failover/settings.json`.
 ## MCP Tools
 
 | Tool | Purpose |
-|---|---|
+|------|---------|
 | `failover_status` | Current state, chain, context headroom |
 | `failover_now` | Manual failover to next/specific provider |
 | `failover_set_model` | Change tier mapping at runtime |
 | `failover_set_providers` | Reorder the failover chain |
 | `failover_list_models` | Show available models and active mappings |
 | `failover_set_debug` | Toggle debug toast notifications |
+| `failover_add_model` | Register a new model at runtime without code changes |

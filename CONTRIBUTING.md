@@ -10,63 +10,107 @@ cd opencode-quota-failover
 bun install
 ```
 
+Verify TypeScript compiles without errors:
+
+```bash
+bunx tsc --noEmit
+```
+
 Run the test suite:
 
 ```bash
 bun test
 ```
 
-The plugin is a single `index.js` file (~1576 lines). All plugin logic lives there — that's an OpenCode plugin convention. Tests are in `index.test.js`. Runtime settings are loaded from `settings.json` at startup and can be updated via MCP tools without restarting.
+## Project Structure
 
-## Architecture Overview
+The plugin is organized into 15 focused TypeScript modules under `src/`. The compiled output is a single `index.js` re-export bridge.
 
-**Single-file plugin** — OpenCode plugins are self-contained. Everything is in `index.js`.
+| Module | Description |
+|--------|-------------|
+| `src/catalog.ts` | Single source of truth for all model definitions — IDs, tiers, context windows, tier patterns |
+| `src/catalog-lookups.ts` | Data-driven query functions derived from the catalog (available models, tier maps, context limits) |
+| `src/types.ts` | Shared TypeScript types and interfaces used across all modules |
+| `src/constants.ts` | Plugin-wide constants: provider IDs, tiers, default chain, cooldown values |
+| `src/state.ts` | In-process runtime state: session maps, cooldown timestamps, watchdog handles |
+| `src/settings.ts` | Disk persistence for runtime settings; read/write `settings.json` |
+| `src/models.ts` | Model selection logic: tier inference, fallback chain construction, provider/tier resolution |
+| `src/detection.ts` | Quota signal detection: `isDefinitiveQuotaError`, `isAmbiguousRateLimitSignal`, `isUsageLimitError` |
+| `src/failover.ts` | Core failover orchestration: queue, process, replay user message to fallback provider |
+| `src/handlers.ts` | OpenCode event handlers bound to `message.updated`, `session.status`, `session.error`, etc. |
+| `src/messages.ts` | Message part normalization and user-message extraction for replay |
+| `src/reporting.ts` | Toast formatting, status reports, and failover event log |
+| `src/tools.ts` | MCP tool definitions exposed to the plugin host |
+| `src/watchdog.ts` | Stall watchdog timer: fires failover if session is idle for too long |
+| `src/index.ts` | Plugin entry point: wires handlers and tools, re-exports key detection functions |
 
-**Error detection** uses a two-tier system:
-
-- `isDefinitiveQuotaError()` — hard quota signals that always trigger failover: `insufficient_quota`, `billing_hard_limit`, HTTP 402, and similar unambiguous exhaustion signals
-- `isAmbiguousRateLimitSignal()` — signals that could be transient rate limits (e.g., 429s without a clear quota message); these only trigger failover via the `session.status` path after a backoff check
-- `isUsageLimitError()` — union of both, used by the `session.status` handler
-
-**Event handlers** — the plugin listens to:
-- `message.updated`
-- `session.status`
-- `session.error`
-- `session.idle`
-- `session.deleted`
-- `message.part.delta`
-
-**Failover flow**: error detected -> `queueFailover()` -> on `session.idle` -> `processFailover()` -> replay the user message to the fallback provider.
-
-**MCP tools** — 6 tools are exposed for runtime control:
-- `failover_status`
-- `failover_now`
-- `failover_set_providers`
-- `failover_set_model`
-- `failover_set_debug`
-- `failover_list_models`
-
-**Settings** — loaded from and saved to `settings.json`, hot-reloadable via the MCP tools above.
+`index.js` at the repo root is a 9-line re-export bridge generated from `src/index.ts`.
 
 ## Running Tests
+
+Two test files cover the full plugin surface:
 
 ```bash
 bun test
 ```
 
-The suite currently runs 96 tests with 0 failures. All PRs must pass the full suite before merge.
+| Test file | What it covers |
+|-----------|----------------|
+| `index.test.js` | End-to-end plugin behavior: detection, failover flow, MCP tools, settings |
+| `src/catalog.test.ts` | Catalog parity: every model has valid tier, default uniqueness, tier pattern coverage |
+
+The suite runs 151 tests with 0 failures. All PRs must pass the full suite before merge.
 
 - Tests use the `bun:test` framework
-- Test file: `index.test.js`
 - New features must include tests
 - Bug fixes should include a regression test
+
+## Adding Models
+
+To add a new model, edit `src/catalog.ts` and add a `ModelDefinition` entry to `MODEL_CATALOG`. Everything else (tier inference, available-model lists, context window estimates) is derived from the catalog automatically.
+
+See [docs/add-a-model.md](./docs/add-a-model.md) for a complete walkthrough.
+
+## Adding Providers
+
+Adding a new provider requires changes in `src/constants.ts` (add to `KNOWN_PROVIDER_IDS`) and `src/catalog.ts` (add models with the new `provider` value). No other files need per-provider hardcoding.
+
+See [docs/add-a-provider.md](./docs/add-a-provider.md) for a complete walkthrough.
+
+## Adding New Error Patterns
+
+If you find a quota or rate-limit error format that isn't handled:
+
+1. Add it to `isDefinitiveQuotaError()` in `src/detection.ts` if it unambiguously signals quota exhaustion
+2. Add it to `isAmbiguousRateLimitSignal()` if it could be a transient rate limit
+3. Write positive AND negative test cases for the new pattern
+4. Include the full error message you observed in the PR description
+
+## Code Style
+
+- TypeScript strict mode (`tsconfig.json` with `strict: true`)
+- Go-style JSDoc for exported functions: one sentence starting with the function name, e.g. `/** inferTierFromModel does classify a model ID into opus/sonnet/haiku. */`
+- No `as any` casts in production code
+- Keep files under 500 lines; split if growing larger
+- Prefer pure functions for testability; export what you need to test
+- No external runtime dependencies beyond `@opencode-ai/plugin`
+
+## PR Guidelines
+
+Before opening a PR:
+
+- `bun test` passes with 0 failures
+- `bunx tsc --noEmit` exits clean
+- No file exceeds 500 lines
+- New models have catalog entries and tests
+- Commit messages follow conventional commits (see below)
 
 ## How to Contribute
 
 1. Fork the repo
 2. Create a branch: `git checkout -b feat/your-feature` or `git checkout -b fix/your-fix`
 3. Make your changes and write tests
-4. Run `bun test` and confirm 0 failures
+4. Run `bun test` and `bunx tsc --noEmit` — both must pass
 5. Commit using conventional commits (see below)
 6. Push and open a PR against `main`
 7. In the PR description, explain what you changed and why
@@ -83,32 +127,6 @@ The suite currently runs 96 tests with 0 failures. All PRs must pass the full su
 | `refactor:` | code restructuring without behavior change |
 
 Example: `fix: treat azure 429 with quota header as definitive quota error`
-
-## Code Style
-
-- ESM modules (`import`/`export`)
-- Plain JavaScript — no TypeScript; JSDoc comments where helpful
-- Single-file constraint: all plugin logic stays in `index.js`
-- No external runtime dependencies beyond `@opencode-ai/plugin`
-- Prefer pure functions for testability
-- Export functions that need unit testing
-
-## Adding New Error Patterns
-
-If you find a quota or rate-limit error format that isn't handled:
-
-1. Add it to `isDefinitiveQuotaError()` if it unambiguously signals quota exhaustion
-2. Add it to `isAmbiguousRateLimitSignal()` if it could be a transient rate limit
-3. Write positive AND negative test cases for the new pattern
-4. Include the full error message you observed in the PR description — it helps reviewers verify the classification is correct
-
-## Adding New Providers
-
-1. Add the provider ID to `KNOWN_PROVIDER_IDS`
-2. Add model tier mappings to `DEFAULT_MODEL_BY_PROVIDER_AND_TIER`
-3. Add available model IDs to `AVAILABLE_MODEL_IDS_BY_PROVIDER`
-4. Update `inferTierFromModel()` with the provider's model ID patterns
-5. Add tests covering the new provider's failover flow
 
 ## Reporting Issues
 

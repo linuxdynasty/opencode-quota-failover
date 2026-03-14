@@ -2,6 +2,7 @@
 
 Automatic AI provider failover for OpenCode — when your quota runs out, your session keeps going.
 
+[![CI](https://github.com/linuxdynasty/opencode-quota-failover/actions/workflows/test.yml/badge.svg)](https://github.com/linuxdynasty/opencode-quota-failover/actions/workflows/test.yml)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.0.0-green.svg)
 
@@ -24,7 +25,7 @@ The plugin distinguishes real quota exhaustion from transient rate limits. Short
 - Manual failover via MCP tools when you want direct control
 - Exact dispatch-failure diagnostics in toasts (`Reason`, `Category`, `Hint`) for faster debugging
 - All settings persisted to disk; no re-configuration on restart
-- 96 tests, 0 failures
+- 151 tests, 0 failures
 
 ---
 
@@ -101,6 +102,14 @@ Transient rate limits — "too many requests", short retry backoffs under 30 min
 
 ---
 
+## Architecture
+
+The plugin is built as 15 focused TypeScript modules compiled to a re-export bridge (`index.js`). The model catalog (`src/catalog.ts`) is the single source of truth for all model definitions, tier mappings, and context windows. No model data is hardcoded elsewhere.
+
+See [docs/architecture.md](./docs/architecture.md) for a full module map and Mermaid dependency diagram.
+
+---
+
 ## Supported providers
 
 | Provider | Provider ID | Example models |
@@ -167,7 +176,7 @@ The file is created with defaults on first run. You can edit it directly or use 
 
 ## MCP tools
 
-The plugin exposes six MCP tools for direct control and inspection.
+The plugin exposes six MCP tools for direct control and inspection. See [docs/mcp-tools.md](./docs/mcp-tools.md) for the full reference with argument schemas and example outputs.
 
 **`failover_status`**
 
@@ -230,6 +239,16 @@ Arguments:
 
 ---
 
+## Contributing a model
+
+To add a new model to the failover catalog, edit `src/catalog.ts` and add a `ModelDefinition` entry. The catalog is the single source of truth — tier inference, context window estimates, and available model lists are all derived from it automatically.
+
+See [docs/add-a-model.md](./docs/add-a-model.md) for a step-by-step walkthrough.
+
+For adding an entirely new provider, see [docs/add-a-provider.md](./docs/add-a-provider.md).
+
+---
+
 ## Quota detection
 
 **These errors trigger failover**
@@ -256,6 +275,8 @@ Arguments:
 ---
 
 ## Troubleshooting
+
+For a more complete troubleshooting reference, see [docs/troubleshooting.md](./docs/troubleshooting.md).
 
 **Failover isn't triggering**
 
