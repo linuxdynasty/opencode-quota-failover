@@ -45,3 +45,9 @@ export const FAILOVER_LOG_MAX_ENTRIES = 100;
 
 /** FAILOVER_LOG_FILE_NAME is the on-disk failover event log file name. */
 export const FAILOVER_LOG_FILE_NAME = 'failover.log';
+
+/** MIN_CUSTOM_PATTERN_LENGTH is the minimum non-wildcard character count for a custom failover pattern. */
+export const MIN_CUSTOM_PATTERN_LENGTH = 10;
+
+/** CUSTOM_PATTERN_WILDCARD is the wildcard character used in custom error patterns and as the all-providers key. */
+export const CUSTOM_PATTERN_WILDCARD = '*';

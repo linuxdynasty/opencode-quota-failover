@@ -1,0 +1,13 @@
+{
+  "agents": {
+    "planner": {
+      "model": "anthropic/claude-opus-4-6"
+    },
+    "builder": {
+      "model": "anthropic/claude-sonnet-4-6"
+    },
+    "researcher": {
+      "model": "anthropic/claude-haiku-4-5"
+    }
+  }
+}

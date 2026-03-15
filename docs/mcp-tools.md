@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The plugin exposes seven MCP tools for inspection and direct control. All tools are defined in `src/tools.ts` using the `tool()` helper from `@opencode-ai/plugin`.
+The plugin exposes twelve MCP tools for inspection and direct control. All tools are defined in `src/tools.ts` using the `tool()` helper from `@opencode-ai/plugin`.
 
 ---
 
@@ -259,3 +259,98 @@ Tip: use failover_set_model to choose a provider/tier target model.
 ```
 
 Runtime-registered models (added via `failover_add_model`) appear in the available models list alongside catalog entries.
+
+---
+
+## failover_set_error_patterns
+
+Set custom error message patterns that force failover for a specific provider, or for all providers with `"*"`.
+
+Patterns are case-insensitive, support `*` wildcards, and must contain at least 10 non-wildcard characters.
+
+**Arguments**
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `provider` | `string` | Yes | Provider ID or `"*"` for a global pattern. Allowed values: `amazon-bedrock`, `openai`, `anthropic`, `*`. |
+| `patterns` | `string[]` | Yes | One or more substring/wildcard patterns to store. |
+| `replace` | `boolean` | No | Replace existing patterns instead of appending. |
+
+**Example**
+
+```
+failover_set_error_patterns(
+  provider: "*",
+  patterns: ["policy*billing*review*hold"],
+  replace: true
+)
+```
+
+---
+
+## failover_clear_error_patterns
+
+Clear custom failover patterns for a specific provider or for all providers.
+
+**Arguments**
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `provider` | `string` | No | Provider ID or `"*"`. Omit to clear all configured patterns. |
+
+---
+
+## failover_add_error_pattern
+
+Add one custom failover pattern for a provider or for all providers with `"*"`.
+
+**Arguments**
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `provider` | `string` | Yes | Provider ID or `"*"` for a global pattern. |
+| `pattern` | `string` | Yes | Case-insensitive substring/wildcard pattern. Minimum 10 non-wildcard characters. |
+
+**Example**
+
+```
+failover_add_error_pattern(
+  provider: "amazon-bedrock",
+  pattern: "request body*not valid json"
+)
+```
+
+---
+
+## failover_remove_error_pattern
+
+Remove one custom failover pattern from a provider.
+
+**Arguments**
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `provider` | `string` | Yes | Provider ID or `"*"` for a global pattern. |
+| `pattern` | `string` | Yes | Pattern to remove. Matching is normalized case-insensitively. |
+
+---
+
+## failover_list_error_patterns
+
+List configured custom failover error patterns by provider.
+
+**Arguments**
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `provider` | `string` | No | Optional provider filter. Allowed values: `amazon-bedrock`, `openai`, `anthropic`, `*`. |
+
+**Example output**
+
+```
+Custom failover error patterns:
+* (1):
+  1. "policy*billing*review*hold"
+amazon-bedrock (1):
+  1. "request body*not valid json"
+```

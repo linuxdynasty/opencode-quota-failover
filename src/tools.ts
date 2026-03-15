@@ -1,10 +1,13 @@
 import { tool } from '@opencode-ai/plugin';
 import { availableModelIDsForProvider, addModelToProviderCatalog, buildModelCatalogReport, canonicalModelID, fallbackSummaryByTier, getSelectionWarningNotes, inferTierFromModel, normalizeCustomModelEntry, normalizeProviderList, providerChainSummary, providerTierSummary, sameCustomModelKey } from './models.js';
-import { KNOWN_TIERS } from './constants.js';
+import { CUSTOM_PATTERN_WILDCARD, KNOWN_PROVIDER_IDS, KNOWN_TIERS, MIN_CUSTOM_PATTERN_LENGTH } from './constants.js';
 import { runtimeSettings, getCustomModels } from './state.js';
 import { saveRuntimeSettings } from './settings.js';
 import { runManualFailover } from './failover.js';
+import { normalizeCustomPattern, validateCustomPattern } from './detection.js';
 import { buildStatusReport } from './reporting.js';
+
+const PATTERN_PROVIDER_ENUM = [...KNOWN_PROVIDER_IDS, CUSTOM_PATTERN_WILDCARD] as const;
 
 /** createTools does build MCP tool definitions bound to plugin runtime context. */
 export function createTools(ctx: any, settingsPath: string) {
@@ -243,6 +246,185 @@ export function createTools(ctx: any, settingsPath: string) {
           modelID: args.modelID,
           tier: args.tier,
         });
+      },
+    }),
+    failover_set_error_patterns: tool({
+      description: 'Set custom error message substring patterns that trigger failover for a provider.',
+      args: {
+        provider: tool.schema
+          .enum(PATTERN_PROVIDER_ENUM)
+          .describe('Provider to configure patterns for'),
+        patterns: tool.schema
+          .array(tool.schema.string().min(1))
+          .min(1)
+          .describe(`Substring/wildcard patterns to match in error messages (case-insensitive, min ${MIN_CUSTOM_PATTERN_LENGTH} non-wildcard chars)`),
+        replace: tool.schema
+          .boolean()
+          .optional()
+          .describe('If true, replace existing patterns. If false (default), append to existing patterns.'),
+      },
+      async execute(args) {
+        const providerID = args.provider;
+        const normalized = args.patterns
+          .map((p: string) => normalizeCustomPattern(p))
+          .filter((p: string) => p.length > 0);
+        if (normalized.length === 0) {
+          return 'No valid patterns provided.';
+        }
+
+        const accepted: string[] = [];
+        const rejected: string[] = [];
+        for (const pattern of normalized) {
+          const validation = validateCustomPattern(pattern);
+          if (validation.valid) {
+            accepted.push(pattern);
+          } else {
+            rejected.push(`"${pattern}": ${validation.reason}`);
+          }
+        }
+
+        if (accepted.length === 0) {
+          return [
+            'All patterns were rejected.',
+            ...rejected.map((entry) => `  - ${entry}`),
+          ].join('\n');
+        }
+
+        const existing = runtimeSettings.customFailoverPatterns[providerID] ?? [];
+        const merged = args.replace
+          ? [...new Set(accepted)]
+          : [...new Set([...existing, ...accepted])];
+        if (merged.length === 0) {
+          delete runtimeSettings.customFailoverPatterns[providerID];
+        } else {
+          runtimeSettings.customFailoverPatterns[providerID] = merged;
+        }
+        await saveRuntimeSettings(settingsPath).catch(() => {});
+
+        const lines = [
+          `Custom failover patterns updated for ${providerID}.`,
+          `Active patterns (${merged.length}):`,
+          ...merged.map((p: string, i: number) => `  ${i + 1}. "${p}"`),
+        ];
+        if (rejected.length > 0) {
+          lines.push('', `Rejected patterns (${rejected.length}):`, ...rejected.map((entry) => `  - ${entry}`));
+        }
+        return lines.join('\n');
+      },
+    }),
+    failover_clear_error_patterns: tool({
+      description: 'Clear custom error message patterns for a provider, or all providers.',
+      args: {
+        provider: tool.schema
+          .enum(PATTERN_PROVIDER_ENUM)
+          .optional()
+          .describe('Provider to clear. If omitted, clears all providers.'),
+      },
+      async execute(args) {
+        if (args.provider) {
+          const hadPatterns = (runtimeSettings.customFailoverPatterns[args.provider] ?? []).length > 0;
+          delete runtimeSettings.customFailoverPatterns[args.provider];
+          await saveRuntimeSettings(settingsPath).catch(() => {});
+          return hadPatterns
+            ? `Custom failover patterns cleared for ${args.provider}.`
+            : `No custom failover patterns were set for ${args.provider}.`;
+        }
+        runtimeSettings.customFailoverPatterns = {};
+        await saveRuntimeSettings(settingsPath).catch(() => {});
+        return 'All custom failover patterns cleared.';
+      },
+    }),
+    failover_add_error_pattern: tool({
+      description: 'Add one custom error pattern for a provider. Supports wildcard * matching.',
+      args: {
+        provider: tool.schema
+          .enum(PATTERN_PROVIDER_ENUM)
+          .describe('Provider to configure pattern for'),
+        pattern: tool.schema
+          .string()
+          .min(1)
+          .describe(`Error substring or wildcard pattern (min ${MIN_CUSTOM_PATTERN_LENGTH} non-wildcard chars)`),
+      },
+      async execute(args) {
+        const providerID = args.provider;
+        const normalized = normalizeCustomPattern(args.pattern);
+        const validation = validateCustomPattern(normalized);
+        if (!validation.valid) {
+          return `Pattern rejected: ${validation.reason}`;
+        }
+
+        const existing = runtimeSettings.customFailoverPatterns[providerID] ?? [];
+        if (existing.includes(normalized)) {
+          return `Pattern already exists for ${providerID}: "${normalized}"`;
+        }
+
+        const next = [...existing, normalized];
+        runtimeSettings.customFailoverPatterns[providerID] = next;
+        await saveRuntimeSettings(settingsPath).catch(() => {});
+        return [
+          `Custom failover pattern added for ${providerID}.`,
+          `Active patterns (${next.length}):`,
+          ...next.map((p: string, i: number) => `  ${i + 1}. "${p}"`),
+        ].join('\n');
+      },
+    }),
+    failover_remove_error_pattern: tool({
+      description: 'Remove one custom error pattern for a provider.',
+      args: {
+        provider: tool.schema
+          .enum(PATTERN_PROVIDER_ENUM)
+          .describe('Provider to remove pattern from'),
+        pattern: tool.schema
+          .string()
+          .min(1)
+          .describe('Pattern string to remove (case-insensitive)'),
+      },
+      async execute(args) {
+        const providerID = args.provider;
+        const normalized = normalizeCustomPattern(args.pattern);
+        const existing = runtimeSettings.customFailoverPatterns[providerID] ?? [];
+        const next = existing.filter((pattern: string) => pattern !== normalized);
+        if (next.length === existing.length) {
+          return `Pattern not found for ${providerID}: "${normalized}"`;
+        }
+
+        if (next.length === 0) {
+          delete runtimeSettings.customFailoverPatterns[providerID];
+        } else {
+          runtimeSettings.customFailoverPatterns[providerID] = next;
+        }
+        await saveRuntimeSettings(settingsPath).catch(() => {});
+        return `Pattern removed for ${providerID}: "${normalized}"`;
+      },
+    }),
+    failover_list_error_patterns: tool({
+      description: 'List configured custom failover error patterns by provider.',
+      args: {
+        provider: tool.schema
+          .enum(PATTERN_PROVIDER_ENUM)
+          .optional()
+          .describe('Optional provider filter'),
+      },
+      async execute(args) {
+        const providers = args.provider
+          ? [args.provider]
+          : [...KNOWN_PROVIDER_IDS, CUSTOM_PATTERN_WILDCARD];
+        const lines: string[] = [];
+        for (const providerID of providers) {
+          const patterns = runtimeSettings.customFailoverPatterns[providerID] ?? [];
+          if (patterns.length === 0) {
+            continue;
+          }
+          lines.push(`${providerID} (${patterns.length}):`);
+          lines.push(...patterns.map((p: string, i: number) => `  ${i + 1}. "${p}"`));
+        }
+
+        if (lines.length === 0) {
+          return args.provider
+            ? `No custom failover error patterns configured for ${args.provider}.`
+            : 'No custom failover error patterns configured.';
+        }
+        return ['Custom failover error patterns:', ...lines].join('\n');
       },
     }),
     failover_status: tool({

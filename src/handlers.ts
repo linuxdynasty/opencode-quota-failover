@@ -40,6 +40,64 @@ import {
   runtimeSettings,
 } from './state.js';
 
+type FailedModel = { providerID: string; modelID: string } | null;
+
+function getFailedModelFromStats(sessionID: string | null | undefined): FailedModel {
+  if (!sessionID) {
+    return null;
+  }
+
+  const lastAssistant = lastAssistantStatsBySession.get(sessionID) as
+    | { providerID?: string; modelID?: string }
+    | undefined;
+  return lastAssistant?.providerID && lastAssistant?.modelID
+    ? {
+        providerID: lastAssistant.providerID,
+        modelID: lastAssistant.modelID,
+      }
+    : null;
+}
+
+async function resolveFailedModelFromSession(ctx: any, sessionID: string | null | undefined): Promise<FailedModel> {
+  const fromStats = getFailedModelFromStats(sessionID);
+  if (fromStats || !sessionID) {
+    return fromStats;
+  }
+
+  try {
+    const response = await ctx.client.session.messages({ path: { id: sessionID } });
+    const messages = Array.isArray(response?.data) ? response.data : [];
+    for (const message of [...messages].reverse()) {
+      const info = message?.info;
+      if (
+        info?.role === 'assistant'
+        && typeof info.providerID === 'string'
+        && typeof info.modelID === 'string'
+      ) {
+        return {
+          providerID: info.providerID,
+          modelID: info.modelID,
+        };
+      }
+    }
+
+    for (const message of [...messages].reverse()) {
+      const model = message?.info?.model;
+      if (
+        typeof model?.providerID === 'string'
+        && typeof model?.modelID === 'string'
+      ) {
+        return {
+          providerID: model.providerID,
+          modelID: model.modelID,
+        };
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
 /** createChatMessageHandler does build the first-user-message info toast handler. */
 export function createChatMessageHandler(ctx: any) {
   return async (input: any, _output: any): Promise<void> => {
@@ -141,6 +199,7 @@ export function createEventHandler(ctx: any) {
           !info.error
           || !shouldTriggerFailover(info.error, failedModel, {
             requireDefinitive: true,
+            customPatterns: runtimeSettings.customFailoverPatterns,
           })
         ) {
           return;
@@ -198,17 +257,10 @@ export function createEventHandler(ctx: any) {
         });
 
         const retryMessage = status.message;
-        const lastAssistant = lastAssistantStatsBySession.get(sessionID) as
-          | { providerID?: string; modelID?: string }
-          | undefined;
-        const failedModel =
-          lastAssistant?.providerID && lastAssistant?.modelID
-            ? {
-                providerID: lastAssistant.providerID,
-                modelID: lastAssistant.modelID,
-              }
-            : null;
-        if (!shouldTriggerFailover(retryMessage, failedModel)) {
+        const failedModel = getFailedModelFromStats(sessionID);
+        if (!shouldTriggerFailover(retryMessage, failedModel, {
+          customPatterns: runtimeSettings.customFailoverPatterns,
+        })) {
           return;
         }
 
@@ -249,23 +301,13 @@ export function createEventHandler(ctx: any) {
       if (event.type === 'session.error') {
         const sessionID = event.properties?.sessionID;
         const error = event.properties?.error;
-        const lastAssistant = sessionID
-          ? (lastAssistantStatsBySession.get(sessionID) as
-            | { providerID?: string; modelID?: string }
-            | undefined)
-          : null;
-        const failedModel =
-          lastAssistant?.providerID && lastAssistant?.modelID
-            ? {
-                providerID: lastAssistant.providerID,
-                modelID: lastAssistant.modelID,
-              }
-            : null;
+        const failedModel = await resolveFailedModelFromSession(ctx, sessionID);
         if (
           !sessionID
           || !error
           || !shouldTriggerFailover(error, failedModel, {
             requireDefinitive: true,
+            customPatterns: runtimeSettings.customFailoverPatterns,
           })
         ) {
           return;

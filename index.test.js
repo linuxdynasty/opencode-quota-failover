@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, failoverEventLog } from "./index.js";
+import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, isCustomFailoverPattern, matchesWildcardPattern, matchWildcardPattern, validateCustomPattern, shouldTriggerFailover, failoverEventLog } from "./index.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -1117,9 +1117,9 @@ describe("opencode-quota-failover", () => {
     expect(debugMessages.some((message) => message.includes("failover.dispatch"))).toBe(true);
   });
 
-  test("all configured oh-my-opencode agents preserve agent and map to correct Bedrock fallback tier", async () => {
+  test("fixture oh-my-opencode agents preserve agent and map to correct Bedrock fallback tier", async () => {
     const __dirname = dirname(fileURLToPath(import.meta.url));
-    const configPath = resolve(__dirname, "../../oh-my-opencode.json");
+    const configPath = resolve(__dirname, "./fixtures/oh-my-opencode.json");
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     const agents = config.agents ?? {};
     const configuredAgentNames = Object.keys(agents);
@@ -1849,6 +1849,301 @@ describe("opencode-quota-failover", () => {
     test("returns false for too many requests", () => {
       expect(isAmbiguousRateLimitSignal({ message: "too many requests" })).toBe(false);
     });
+  });
+
+  describe("isProviderRequestError - provider request validation failures", () => {
+    // POSITIVE: MUST return true
+    test("returns true for exact observed Bedrock invalid JSON body error", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: The request body is not valid JSON."
+      })).toBe(true);
+    });
+
+    test("returns true for string-form error with undefined: prefix (production shape)", () => {
+      expect(isProviderRequestError(
+        "undefined: The model returned the following errors: The request body is not valid JSON."
+      )).toBe(true);
+    });
+
+    test("returns true when error is in nested data.message", () => {
+      expect(isProviderRequestError({
+        data: { message: "The model returned the following errors: The request body is not valid JSON." }
+      })).toBe(true);
+    });
+
+    test("returns true for nested error.data.message shape", () => {
+      expect(isProviderRequestError({
+        error: {
+          data: { message: "The model returned the following errors: The request body is not valid JSON." }
+        }
+      })).toBe(true);
+    });
+
+    test("returns true for 'invalid request' variant", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: invalid request format detected"
+      })).toBe(true);
+    });
+
+    test("returns true for 'malformed request' variant", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: malformed request body received"
+      })).toBe(true);
+    });
+
+    test("returns true for 'request body' standalone variant", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: request body could not be parsed"
+      })).toBe(true);
+    });
+
+    // NEGATIVE: MUST return false
+    test("returns false for 'not valid json' WITHOUT Bedrock prefix", () => {
+      expect(isProviderRequestError({
+        message: "The request body is not valid JSON."
+      })).toBe(false);
+    });
+
+    test("returns false for Bedrock prefix WITHOUT request error signal", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: some unrelated error occurred"
+      })).toBe(false);
+    });
+
+    test("returns false for thinking-block mutation error (same prefix, different signals)", () => {
+      expect(isProviderRequestError({
+        message: "The model returned the following errors: thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified"
+      })).toBe(false);
+    });
+
+    test("returns false for quota error", () => {
+      expect(isProviderRequestError({ message: "insufficient_quota" })).toBe(false);
+    });
+
+    test("returns false for rate limit error", () => {
+      expect(isProviderRequestError({ message: "rate limit exceeded, retry in 30 seconds" })).toBe(false);
+    });
+
+    test("returns false for context length error", () => {
+      expect(isProviderRequestError({ message: "context length exceeded" })).toBe(false);
+    });
+
+    test("returns false for null/undefined/empty inputs", () => {
+      expect(isProviderRequestError(null)).toBe(false);
+      expect(isProviderRequestError(undefined)).toBe(false);
+      expect(isProviderRequestError("")).toBe(false);
+      expect(isProviderRequestError({})).toBe(false);
+    });
+  });
+
+  describe("shouldTriggerFailover - Bedrock provider request errors", () => {
+    const bedrockOpus = { providerID: "amazon-bedrock", modelID: "us.anthropic.claude-opus-4-6-v1" };
+    const bedrockSonnet = { providerID: "amazon-bedrock", modelID: "us.anthropic.claude-sonnet-4-6" };
+    const bedrockHaiku = { providerID: "amazon-bedrock", modelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0" };
+    const anthropicOpus = { providerID: "anthropic", modelID: "claude-opus-4-6" };
+    const openaiOpus = { providerID: "openai", modelID: "gpt-5.4" };
+    const invalidJsonError = { message: "The model returned the following errors: The request body is not valid JSON." };
+
+    test("returns true for Bedrock Opus + invalid JSON body (requireDefinitive=true)", () => {
+      expect(shouldTriggerFailover(invalidJsonError, bedrockOpus, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("returns true for Bedrock Sonnet + invalid JSON body", () => {
+      expect(shouldTriggerFailover(invalidJsonError, bedrockSonnet, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("returns true for Bedrock Haiku + invalid JSON body", () => {
+      expect(shouldTriggerFailover(invalidJsonError, bedrockHaiku, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("returns false for Anthropic + invalid JSON body (not Bedrock)", () => {
+      expect(shouldTriggerFailover(invalidJsonError, anthropicOpus, { requireDefinitive: true })).toBe(false);
+    });
+
+    test("returns false for OpenAI + invalid JSON body (not Bedrock)", () => {
+      expect(shouldTriggerFailover(invalidJsonError, openaiOpus, { requireDefinitive: true })).toBe(false);
+    });
+
+    test("returns false for null model + invalid JSON body", () => {
+      expect(shouldTriggerFailover(invalidJsonError, null, { requireDefinitive: true })).toBe(false);
+    });
+
+    test("returns false for Bedrock + unrelated error", () => {
+      expect(shouldTriggerFailover({ message: "connection timeout" }, bedrockOpus, { requireDefinitive: true })).toBe(false);
+    });
+
+    // Backward compatibility
+    test("still returns true for definitive quota error regardless of provider", () => {
+      expect(shouldTriggerFailover({ message: "insufficient_quota" }, anthropicOpus, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("still returns true for Bedrock Opus + thinking-block mutation error", () => {
+      expect(shouldTriggerFailover(
+        { message: "The model returned the following errors: thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. They must remain as they were in the original response." },
+        bedrockOpus,
+        { requireDefinitive: true }
+      )).toBe(true);
+    });
+
+    test("thinking-block error does NOT trigger for non-Opus Bedrock model", () => {
+      expect(shouldTriggerFailover(
+        { message: "The model returned the following errors: thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. They must remain as they were in the original response." },
+        bedrockSonnet,
+        { requireDefinitive: true }
+      )).toBe(false);
+    });
+  });
+
+  test("message.updated triggers failover for Bedrock invalid JSON body error", async () => {
+    const sessionID = "s-bedrock-invalid-json-msg";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-bedrock-invalid-json-msg",
+          agent: "sisyphus",
+          providerID: "amazon-bedrock",
+          modelID: "us.anthropic.claude-opus-4-6-v1"
+        }),
+        makeAssistantErrorMessage(
+          sessionID,
+          "amazon-bedrock",
+          "us.anthropic.claude-opus-4-6-v1",
+          "The model returned the following errors: The request body is not valid JSON.",
+          400
+        )
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: messagesBySession[sessionID][1].info }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.model.providerID).toBe("openai");
+  });
+
+  test("session.error triggers failover for Bedrock invalid JSON body error", async () => {
+    const sessionID = "s-bedrock-invalid-json-se";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-bedrock-invalid-json-se",
+          providerID: "amazon-bedrock",
+          modelID: "us.anthropic.claude-opus-4-6-v1"
+        })
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    // Record lastAssistantStats so session.error handler can resolve failedModel
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "a-stats-bedrock-json-se",
+            sessionID,
+            role: "assistant",
+            providerID: "amazon-bedrock",
+            modelID: "us.anthropic.claude-opus-4-6-v1",
+            tokens: { input: 1000, output: 0, reasoning: 0 }
+          }
+        }
+      }
+    });
+
+    await hooks.event({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID,
+          error: { message: "The model returned the following errors: The request body is not valid JSON." }
+        }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.model.providerID).toBe("openai");
+  });
+
+  test("session.error infers failed model from session messages when assistant stats are missing", async () => {
+    const sessionID = "s-bedrock-invalid-json-se-no-stats";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-bedrock-invalid-json-se-no-stats",
+          agent: "sisyphus",
+          providerID: "amazon-bedrock",
+          modelID: "us.anthropic.claude-opus-4-6-v1"
+        })
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID,
+          error: { message: "The model returned the following errors: The request body is not valid JSON." }
+        }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.agent).toBe("sisyphus");
+    expect(promptCalls[0].body.model.providerID).toBe("openai");
+  });
+
+  test("message.updated does NOT trigger failover for non-Bedrock provider with same error text", async () => {
+    const sessionID = "s-anthropic-invalid-json-no-fo";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-anthropic-invalid-json-no-fo",
+          agent: "sisyphus",
+          providerID: "anthropic",
+          modelID: "claude-opus-4-6"
+        }),
+        makeAssistantErrorMessage(
+          sessionID,
+          "anthropic",
+          "claude-opus-4-6",
+          "The model returned the following errors: The request body is not valid JSON.",
+          400
+        )
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: messagesBySession[sessionID][1].info }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(0);
   });
 
   test("message.updated does NOT trigger failover for ambiguous 'account rate limit' without backoff", async () => {
@@ -3382,4 +3677,775 @@ describe("opencode-quota-failover", () => {
     });
   });
 
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Per-Provider Custom Failover Error Patterns
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("isCustomFailoverPattern detection", () => {
+    test("returns false when no patterns are configured for the provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        await quotaFailoverPlugin(ctx);
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "some error text" }, "anthropic")).toBe(false);
+      });
+    });
+
+    test("returns false when providerID is null", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["custom_error"] },
+          makeToolContext("detect-null-provider")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "custom_error happened" }, null)).toBe(false);
+      });
+    });
+
+    test("returns false when providerID is undefined", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["custom_error"] },
+          makeToolContext("detect-undef-provider")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "custom_error happened" }, undefined)).toBe(false);
+      });
+    });
+
+    test("returns true when error text matches a configured pattern (case-insensitive)", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["CREDIT_LIMIT_EXCEEDED"] },
+          makeToolContext("detect-match")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "credit_limit_exceeded for your account" }, "anthropic")).toBe(true);
+      });
+    });
+
+    test("returns false when error text does not match any configured pattern", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["credit_limit_exceeded"] },
+          makeToolContext("detect-no-match")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "network timeout error" }, "anthropic")).toBe(false);
+      });
+    });
+
+    test("returns false when pattern is empty string (filtered out)", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        // Only whitespace patterns should be filtered during set
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["valid_pattern"] },
+          makeToolContext("detect-empty-pattern")
+        );
+        expect(result).toContain("valid_pattern");
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "valid_pattern hit" }, "anthropic")).toBe(true);
+      });
+    });
+
+    test("patterns are provider-scoped: anthropic pattern does not match openai error", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["my_custom_signal"] },
+          makeToolContext("detect-scoped")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        // Matches for anthropic
+        expect(isCustomFailoverPattern({ message: "my_custom_signal" }, "anthropic")).toBe(true);
+        // Does NOT match for openai (different provider)
+        expect(isCustomFailoverPattern({ message: "my_custom_signal" }, "openai")).toBe(false);
+      });
+    });
+  });
+
+  describe("failover_set_error_patterns tool", () => {
+    test("sets patterns for a provider and returns confirmation listing them", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["out_of_tokens", "daily_cap_hit"] },
+          makeToolContext("set-patterns-basic")
+        );
+        expect(result).toContain("Custom failover patterns updated for openai.");
+        expect(result).toContain('"out_of_tokens"');
+        expect(result).toContain('"daily_cap_hit"');
+        expect(result).toContain("Active patterns (2):");
+      });
+    });
+
+    test("appends to existing patterns by default", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["first_pattern"] },
+          makeToolContext("set-patterns-append")
+        );
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["second_pattern"] },
+          makeToolContext("set-patterns-append")
+        );
+        expect(result).toContain('"first_pattern"');
+        expect(result).toContain('"second_pattern"');
+        expect(result).toContain("Active patterns (2):");
+      });
+    });
+
+    test("deduplicates on append", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["same_pattern"] },
+          makeToolContext("set-patterns-dedup")
+        );
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["same_pattern"] },
+          makeToolContext("set-patterns-dedup")
+        );
+        expect(result).toContain("Active patterns (1):");
+      });
+    });
+
+    test("replaces existing patterns when replace: true", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["old_pattern"] },
+          makeToolContext("set-patterns-replace")
+        );
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["new_pattern"], replace: true },
+          makeToolContext("set-patterns-replace")
+        );
+        expect(result).toContain('"new_pattern"');
+        expect(result).not.toContain('"old_pattern"');
+        expect(result).toContain("Active patterns (1):");
+      });
+    });
+
+    test("persists patterns to settings.json", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "amazon-bedrock", patterns: ["throttlingexception", "serviceexception"] },
+          makeToolContext("set-patterns-persist")
+        );
+        const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect(saved.customFailoverPatterns?.["amazon-bedrock"]).toEqual(["throttlingexception", "serviceexception"]);
+      });
+    });
+  });
+
+  describe("failover_clear_error_patterns tool", () => {
+    test("clears patterns for a specific provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["my_error_code"] },
+          makeToolContext("clear-patterns-specific")
+        );
+        const result = await hooks.tool.failover_clear_error_patterns.execute(
+          { provider: "anthropic" },
+          makeToolContext("clear-patterns-specific")
+        );
+        expect(result).toContain("Custom failover patterns cleared for anthropic.");
+      });
+    });
+
+    test("reports when no patterns were set for the provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_clear_error_patterns.execute(
+          { provider: "openai" },
+          makeToolContext("clear-patterns-none")
+        );
+        expect(result).toContain("No custom failover patterns were set for openai.");
+      });
+    });
+
+    test("clears all providers when no provider argument given", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["err_a_long"] },
+          makeToolContext("clear-patterns-all")
+        );
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["err_b_long"] },
+          makeToolContext("clear-patterns-all")
+        );
+        const result = await hooks.tool.failover_clear_error_patterns.execute(
+          {},
+          makeToolContext("clear-patterns-all")
+        );
+        expect(result).toContain("All custom failover patterns cleared.");
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "err_a_long" }, "anthropic")).toBe(false);
+        expect(isCustomFailoverPattern({ message: "err_b_long" }, "openai")).toBe(false);
+      });
+    });
+
+    test("persists cleared state to settings.json", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["my_signal_long"] },
+          makeToolContext("clear-patterns-persist")
+        );
+        await hooks.tool.failover_clear_error_patterns.execute(
+          { provider: "anthropic" },
+          makeToolContext("clear-patterns-persist")
+        );
+        const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect((saved.customFailoverPatterns?.["anthropic"] ?? []).length).toBe(0);
+      });
+    });
+  });
+
+  describe("shouldTriggerFailover with custom patterns", () => {
+    test("returns true when custom pattern matches error text for the correct provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["account_suspended"] },
+          makeToolContext("trigger-custom-match")
+        );
+        const result = shouldTriggerFailover(
+          { message: "account_suspended: your plan has been suspended" },
+          { providerID: "openai", modelID: "gpt-5.4" }
+        );
+        expect(result).toBe(true);
+      });
+    });
+
+    test("returns false when custom pattern matches but wrong provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["account_suspended"] },
+          makeToolContext("trigger-custom-scope")
+        );
+        const result = shouldTriggerFailover(
+          { message: "account_suspended: your plan has been suspended" },
+          { providerID: "openai", modelID: "gpt-5.4" }
+        );
+        // anthropic pattern should NOT fire for openai provider
+        expect(result).toBe(false);
+      });
+    });
+
+    test("message.updated triggers failover when global '*' custom pattern matches", async () => {
+      await withTempSettings(async () => {
+        const sessionID = "s-global-custom-pattern";
+        const messagesBySession = {
+          [sessionID]: [
+            makeUserMessage(sessionID, {
+              id: "u-global-custom-pattern",
+              agent: "sisyphus",
+              providerID: "anthropic",
+              modelID: "claude-opus-4-6"
+            }),
+            makeAssistantErrorMessage(
+              sessionID,
+              "anthropic",
+              "claude-opus-4-6",
+              "Provider policy billing review hold prevented this request.",
+              429,
+              "a-global-custom-pattern"
+            )
+          ]
+        };
+        const { ctx, promptCalls } = createContext(messagesBySession);
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "*", pattern: "policy*billing*review*hold" },
+          makeToolContext("global-custom-pattern")
+        );
+
+        await hooks.event({
+          event: {
+            type: "message.updated",
+            properties: { info: messagesBySession[sessionID][1].info }
+          }
+        });
+        await hooks.event({
+          event: { type: "session.idle", properties: { sessionID } }
+        });
+
+        expect(promptCalls).toHaveLength(1);
+        expect(promptCalls[0].body.model.providerID).toBe("amazon-bedrock");
+      });
+    });
+  });
+
+  describe("custom patterns persist across plugin reload", () => {
+    test("patterns survive reload: save then reload then patterns still present", async () => {
+      await withTempSettings(async () => {
+        const { ctx: ctx1 } = createContext({});
+        const hooks1 = await quotaFailoverPlugin(ctx1);
+        await hooks1.tool.failover_set_error_patterns.execute(
+          { provider: "amazon-bedrock", patterns: ["bedrock_quota_reached"] },
+          makeToolContext("reload-persist")
+        );
+
+        // Reload plugin
+        const { ctx: ctx2 } = createContext({});
+        await quotaFailoverPlugin(ctx2);
+
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "bedrock_quota_reached" }, "amazon-bedrock")).toBe(true);
+      });
+    });
+  });
+
+  describe("new custom error pattern tools", () => {
+    test("matchWildcardPattern supports wildcard matching", () => {
+      expect(matchWildcardPattern("quota exceeded for account", "quota*account")).toBe(true);
+      expect(matchWildcardPattern("quota exceeded for account", "*exceeded*")).toBe(true);
+      expect(matchWildcardPattern("quota exceeded", "billing*limit")).toBe(false);
+    });
+
+    test("failover_add_error_pattern enforces minimum length", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "short" },
+          makeToolContext("new-add-short")
+        );
+        expect(result).toContain("at least 10");
+      });
+    });
+
+    test("failover_add_error_pattern lowercases and persists pattern", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "ACCOUNT_SUSPENDED_LONG" },
+          makeToolContext("new-add-persist")
+        );
+        const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect(saved.customFailoverPatterns?.openai).toContain("account_suspended_long");
+      });
+    });
+
+    test("failover_remove_error_pattern removes a pattern", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "remove_me_pattern" },
+          makeToolContext("new-remove")
+        );
+        const result = await hooks.tool.failover_remove_error_pattern.execute(
+          { provider: "openai", pattern: "REMOVE_ME_PATTERN" },
+          makeToolContext("new-remove")
+        );
+        expect(result).toContain('Pattern removed for openai: "remove_me_pattern"');
+      });
+    });
+
+    test("failover_list_error_patterns lists configured patterns", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "anthropic", pattern: "listable_pattern_long" },
+          makeToolContext("new-list")
+        );
+        const result = await hooks.tool.failover_list_error_patterns.execute(
+          {},
+          makeToolContext("new-list")
+        );
+        expect(result).toContain("Custom failover error patterns:");
+        expect(result).toContain("anthropic");
+        expect(result).toContain('"listable_pattern_long"');
+      });
+    });
+
+    test("loadRuntimeSettings lowercases and filters short custom patterns", async () => {
+      await withTempSettings(async (settingsPath) => {
+        writeFileSync(
+          settingsPath,
+          JSON.stringify(
+            {
+              customFailoverPatterns: {
+                openai: ["short", "VALID_LONG_PATTERN"]
+              }
+            },
+            null,
+            2
+          )
+        );
+
+        const { ctx } = createContext({});
+        await quotaFailoverPlugin(ctx);
+
+        expect(isCustomFailoverPattern({ message: "valid_long_pattern" }, "openai")).toBe(true);
+        expect(isCustomFailoverPattern({ message: "short" }, "openai")).toBe(false);
+      });
+    });
+  });
+
+  describe("failover_status includes custom error patterns section", () => {
+    test("shows custom patterns when patterns are set", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["overload_error"] },
+          makeToolContext("status-patterns-set")
+        );
+        const status = await hooks.tool.failover_status.execute(
+          { sessionID: "status-patterns-set" },
+          makeToolContext("status-patterns-set")
+        );
+        expect(status).toContain("Custom error patterns:");
+        expect(status).toContain("anthropic");
+        expect(status).toContain('"overload_error"');
+      });
+    });
+
+    test("shows 'none' when no patterns are configured", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const status = await hooks.tool.failover_status.execute(
+          { sessionID: "status-patterns-none" },
+          makeToolContext("status-patterns-none")
+        );
+        expect(status).toContain("Custom error patterns: none");
+      });
+    });
+  });
+
+  describe("custom error pattern v2 tools", () => {
+    test("failover_add_error_pattern adds and lowercases a pattern", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "ACCOUNT*RATE*LIMIT SIGNAL" },
+          makeToolContext("add-pattern")
+        );
+        expect(result).toContain("Custom failover pattern added for openai.");
+        const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect(saved.customFailoverPatterns?.openai).toEqual(["account*rate*limit signal"]);
+      });
+    });
+
+    test("failover_add_error_pattern enforces minimum length", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "short" },
+          makeToolContext("add-pattern-short")
+        );
+        expect(result).toContain("at least 10");
+      });
+    });
+
+    test("failover_remove_error_pattern removes one pattern", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "remove this pattern" },
+          makeToolContext("remove-pattern")
+        );
+        const result = await hooks.tool.failover_remove_error_pattern.execute(
+          { provider: "openai", pattern: "REMOVE THIS PATTERN" },
+          makeToolContext("remove-pattern")
+        );
+        expect(result).toContain("Pattern removed for openai");
+      });
+    });
+
+    test("failover_list_error_patterns lists configured patterns", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "anthropic", pattern: "listable pattern here" },
+          makeToolContext("list-pattern")
+        );
+        const result = await hooks.tool.failover_list_error_patterns.execute(
+          { provider: "anthropic" },
+          makeToolContext("list-pattern")
+        );
+        expect(result).toContain("anthropic (1):");
+        expect(result).toContain("listable pattern here");
+      });
+    });
+  });
+
+  describe("custom wildcard matching", () => {
+    test("supports * wildcard with ordered segments", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["billing*limit*exceeded"] },
+          makeToolContext("wildcard-match")
+        );
+        const result = shouldTriggerFailover(
+          { message: "customer billing hard limit has exceeded threshold" },
+          { providerID: "openai", modelID: "gpt-5.4" }
+        );
+        expect(result).toBe(true);
+      });
+    });
+
+    test("does not match when wildcard segments appear out of order", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["billing*limit*exceeded"] },
+          makeToolContext("wildcard-order")
+        );
+        const result = shouldTriggerFailover(
+          { message: "zreached before zbilling and never zexceeded" },
+          { providerID: "openai", modelID: "gpt-5.4" }
+        );
+        expect(result).toBe(false);
+      });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // matchesWildcardPattern Unit Tests
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("matchesWildcardPattern unit tests", () => {
+    test("returns false for empty text", () => {
+      expect(matchesWildcardPattern("", "hello")).toBe(false);
+    });
+
+    test("returns false for empty pattern", () => {
+      expect(matchesWildcardPattern("say hello world", "")).toBe(false);
+    });
+
+    test("returns false for both empty", () => {
+      expect(matchesWildcardPattern("", "")).toBe(false);
+    });
+
+    test("plain substring match (no wildcard)", () => {
+      expect(matchesWildcardPattern("say hello world", "hello")).toBe(true);
+    });
+
+    test("plain substring no match", () => {
+      expect(matchesWildcardPattern("hello", "goodbye")).toBe(false);
+    });
+
+    test("single * wildcard matches", () => {
+      expect(matchesWildcardPattern("billing limit exceeded", "billing*exceeded")).toBe(true);
+    });
+
+    test("single * wildcard no match", () => {
+      expect(matchesWildcardPattern("exceeded before billing", "billing*exceeded")).toBe(false);
+    });
+
+    test("multiple * wildcards match", () => {
+      expect(matchesWildcardPattern("alpha bravo charlie", "a*b*c")).toBe(true);
+    });
+
+    test("multiple * wildcards no match when segments out of order", () => {
+      expect(matchesWildcardPattern("charlie bravo alpha", "a*b*c")).toBe(false);
+    });
+
+    test("pattern that is all wildcards matches any non-empty text", () => {
+      expect(matchesWildcardPattern("anything", "***")).toBe(true);
+    });
+
+    test("pattern that is all wildcards returns false for empty text", () => {
+      expect(matchesWildcardPattern("", "***")).toBe(false);
+    });
+
+    test("leading wildcard matches", () => {
+      expect(matchesWildcardPattern("quota exceeded", "*exceeded")).toBe(true);
+    });
+
+    test("trailing wildcard matches", () => {
+      expect(matchesWildcardPattern("quota limit", "quota*")).toBe(true);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // validateCustomPattern Unit Tests
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("validateCustomPattern unit tests", () => {
+    test("rejects empty string", () => {
+      expect(validateCustomPattern("")).toEqual({
+        valid: false,
+        reason: expect.any(String),
+      });
+    });
+
+    test("rejects string shorter than 10 non-wildcard chars", () => {
+      expect(validateCustomPattern("short")).toEqual({
+        valid: false,
+        reason: expect.stringContaining("10"),
+      });
+    });
+
+    test("rejects wildcard-only pattern (no literal chars)", () => {
+      expect(validateCustomPattern("***")).toEqual({
+        valid: false,
+        reason: expect.stringContaining("10"),
+      });
+    });
+
+    test("rejects pattern where non-wildcard chars are under 10", () => {
+      expect(validateCustomPattern("abc*def")).toEqual({
+        valid: false,
+        reason: expect.any(String),
+      });
+    });
+
+    test("accepts pattern with exactly 10 non-wildcard chars", () => {
+      expect(validateCustomPattern("1234567890")).toEqual({ valid: true });
+    });
+
+    test("accepts wildcard pattern with enough literal chars", () => {
+      expect(validateCustomPattern("billing*limit*exceeded")).toEqual({ valid: true });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // failover_add_error_pattern Additional Coverage
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("failover_add_error_pattern additional coverage", () => {
+    test("rejects duplicate pattern with exact message", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "unique_long_pattern" },
+          makeToolContext("add-dup")
+        );
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "unique_long_pattern" },
+          makeToolContext("add-dup")
+        );
+        expect(result).toContain("already exists");
+      });
+    });
+
+    test("rejects pattern with fewer than 10 non-wildcard chars even with wildcards", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "ab*cd*ef" },
+          makeToolContext("add-wildcard-short")
+        );
+        expect(result).toContain("rejected");
+      });
+    });
+
+    test("adds pattern with wildcards when literal chars are sufficient", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "billing*limit*exceeded" },
+          makeToolContext("add-wildcard-ok")
+        );
+        expect(result).toContain("Custom failover pattern added");
+      });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // failover_remove_error_pattern Additional Coverage
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("failover_remove_error_pattern additional coverage", () => {
+    test("returns not-found message for non-existent pattern", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_remove_error_pattern.execute(
+          { provider: "openai", pattern: "does_not_exist_pattern" },
+          makeToolContext("remove-notfound")
+        );
+        expect(result).toContain("Pattern not found");
+      });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // failover_list_error_patterns Additional Coverage
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("failover_list_error_patterns additional coverage", () => {
+    test("returns empty message for specific provider with no patterns", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_list_error_patterns.execute(
+          { provider: "openai" },
+          makeToolContext("list-empty-provider")
+        );
+        expect(result).toContain("No custom failover error patterns configured for openai");
+      });
+    });
+
+    test("lists patterns from multiple providers when no filter given", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "openai_specific_error" },
+          makeToolContext("list-multi")
+        );
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "anthropic", pattern: "anthropic_specific_error" },
+          makeToolContext("list-multi")
+        );
+        const result = await hooks.tool.failover_list_error_patterns.execute(
+          {},
+          makeToolContext("list-multi")
+        );
+        expect(result).toContain("openai");
+        expect(result).toContain("anthropic");
+        expect(result).toContain("openai_specific_error");
+        expect(result).toContain("anthropic_specific_error");
+      });
+    });
+  });
 });

@@ -24,6 +24,8 @@ The plugin distinguishes real quota exhaustion from transient rate limits. Short
 - Global cooldown prevents cascade failovers across concurrent subagent sessions
 - Manual failover via MCP tools when you want direct control
 - Exact dispatch-failure diagnostics in toasts (`Reason`, `Category`, `Hint`) for faster debugging
+- Bedrock request-rejection detection for hard blocks like `The request body is not valid JSON`
+- Custom provider-scoped or global (`*`) error patterns that can trigger failover
 - All settings persisted to disk; no re-configuration on restart
 - 151 tests, 0 failures
 
@@ -152,6 +154,10 @@ The file is created with defaults on first run. You can edit it directly or use 
       "haiku": "claude-haiku-4-5"
     }
   },
+  "customFailoverPatterns": {
+    "*": ["policy*billing*review*hold"],
+    "openai": ["account*suspended"]
+  },
   "debugToasts": true,
   "stallWatchdogEnabled": false,
   "stallWatchdogMs": 45000,
@@ -166,6 +172,7 @@ The file is created with defaults on first run. You can edit it directly or use 
 |---|---|---|---|
 | `providerChain` | `string[]` | `["amazon-bedrock", "openai"]` | Ordered list of fallback providers. When failover triggers, the plugin moves to the next provider in this list. |
 | `modelByProviderAndTier` | `object` | See above | Maps each provider and tier (opus/sonnet/haiku) to a specific model ID. |
+| `customFailoverPatterns` | `object` | `{}` | Optional provider-keyed error patterns that force failover when matched. Use provider IDs (`anthropic`, `amazon-bedrock`, `openai`) or `"*"` for a global match. Patterns are case-insensitive and support `*` wildcards. |
 | `debugToasts` | `boolean` | `true` | Show toast notifications when quota signals are detected. Useful for diagnosing unexpected failovers. |
 | `stallWatchdogEnabled` | `boolean` | `false` | Enable a watchdog timer that fires failover if the session stalls for longer than `stallWatchdogMs`. |
 | `stallWatchdogMs` | `number` | `45000` | Milliseconds before the stall watchdog fires. Only applies when `stallWatchdogEnabled` is true. |
@@ -176,7 +183,7 @@ The file is created with defaults on first run. You can edit it directly or use 
 
 ## MCP tools
 
-The plugin exposes seven MCP tools for direct control and inspection. See [docs/mcp-tools.md](./docs/mcp-tools.md) for the full reference with argument schemas and example outputs.
+The plugin exposes twelve MCP tools for direct control and inspection. See [docs/mcp-tools.md](./docs/mcp-tools.md) for the full reference with argument schemas and example outputs.
 
 **`failover_status`**
 
@@ -246,8 +253,57 @@ Arguments:
   provider       string   Provider ID (anthropic | amazon-bedrock | openai)
   modelID        string   Model ID to register
   tier           string   Tier: opus | sonnet | haiku
-  isDefault      boolean  (optional) Set as default for this provider/tier
+  setDefault     boolean  (optional) Set as default for this provider/tier
   contextWindow  number   (optional) Token context window size
+```
+
+**`failover_set_error_patterns`**
+
+Set one or more custom error patterns for a provider or for all providers via `"*"`.
+
+```
+Arguments:
+  provider  string     Provider ID (anthropic | amazon-bedrock | openai | *)
+  patterns  string[]   Case-insensitive substring/wildcard patterns
+  replace   boolean    (optional) Replace existing patterns instead of appending
+```
+
+**`failover_clear_error_patterns`**
+
+Clear custom error patterns for a provider or all providers.
+
+```
+Arguments:
+  provider  string  (optional) Provider ID (anthropic | amazon-bedrock | openai | *)
+```
+
+**`failover_add_error_pattern`**
+
+Add one custom error pattern for a provider or for all providers via `"*"`.
+
+```
+Arguments:
+  provider  string  Provider ID (anthropic | amazon-bedrock | openai | *)
+  pattern   string  Case-insensitive substring/wildcard pattern
+```
+
+**`failover_remove_error_pattern`**
+
+Remove one custom error pattern for a provider.
+
+```
+Arguments:
+  provider  string  Provider ID (anthropic | amazon-bedrock | openai | *)
+  pattern   string  Pattern to remove
+```
+
+**`failover_list_error_patterns`**
+
+List configured custom failover error patterns by provider.
+
+```
+Arguments:
+  provider  string  (optional) Provider ID (anthropic | amazon-bedrock | openai | *)
 ```
 
 ---
@@ -274,6 +330,7 @@ For adding an entirely new provider, see [docs/add-a-provider.md](./docs/add-a-p
 | "out of credits" | Account credits depleted |
 | HTTP 402 + billing language | Payment required with billing context |
 | Retry backoff >= 30 min + account/quota words | Ambiguous signal with long backoff |
+| Bedrock request rejection: `The request body is not valid JSON` | Hard provider-side request block on Bedrock models |
 
 **These errors do NOT trigger failover**
 

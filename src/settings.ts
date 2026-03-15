@@ -21,9 +21,40 @@ import {
   normalizeProviderList,
   sameCustomModelKey,
 } from './models.js';
+import { validateCustomPattern } from './detection.js';
 import { recordFailoverEvent } from './reporting.js';
 
 const DEFAULT_MODEL_BY_PROVIDER_AND_TIER = buildDefaultProviderTierMatrix();
+
+function normalizeCustomFailoverPatterns(input: unknown): Record<string, string[]> {
+  const normalized: Record<string, string[]> = {};
+  if (!input || typeof input !== 'object') {
+    return normalized;
+  }
+
+  for (const providerID of Object.keys(input as Record<string, unknown>)) {
+    const candidates = (input as Record<string, unknown>)[providerID];
+    if (!Array.isArray(candidates)) {
+      continue;
+    }
+
+    const valid = [...new Set(
+      candidates
+        .filter((p: unknown) => typeof p === 'string')
+        .map((p: string) => p.trim().toLowerCase())
+        .filter((p: string) => {
+          const result = validateCustomPattern(p);
+          return result.valid;
+        }),
+    )];
+
+    if (valid.length > 0) {
+      normalized[providerID] = valid;
+    }
+  }
+
+  return normalized;
+}
 
 /** settingsPathForRuntime does resolve the settings file path for the current runtime. */
 export function settingsPathForRuntime(): string {
@@ -148,6 +179,10 @@ export async function loadRuntimeSettings(path: string): Promise<void> {
     if (Number.isFinite(parsed?.minRetryBackoffMs)) {
       runtimeSettings.minRetryBackoffMs = Math.max(0, Math.round(parsed.minRetryBackoffMs));
     }
+
+    if (parsed?.customFailoverPatterns && typeof parsed.customFailoverPatterns === 'object') {
+      runtimeSettings.customFailoverPatterns = normalizeCustomFailoverPatterns(parsed.customFailoverPatterns);
+    }
   } catch {}
 }
 
@@ -162,6 +197,7 @@ export async function saveRuntimeSettings(path: string): Promise<void> {
     stallWatchdogEnabled: runtimeSettings.stallWatchdogEnabled,
     globalCooldownMs: runtimeSettings.globalCooldownMs,
     minRetryBackoffMs: runtimeSettings.minRetryBackoffMs,
+    customFailoverPatterns: normalizeCustomFailoverPatterns(runtimeSettings.customFailoverPatterns),
     updatedAt: new Date().toISOString(),
   };
 

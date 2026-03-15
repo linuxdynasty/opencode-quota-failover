@@ -46,6 +46,8 @@ export interface RuntimeSettings {
   globalCooldownMs: number;
   /** Minimum retry backoff that qualifies as quota exhaustion. */
   minRetryBackoffMs: number;
+  /** Per-provider substring patterns that trigger failover when matched in error text. */
+  customFailoverPatterns: Record<string, string[]>;
 }
 
 /** ErrorDetails aggregates error information extracted from heterogeneous provider error shapes. */
@@ -158,6 +160,8 @@ export interface PersistedSettings {
   globalCooldownMs?: number;
   /** Optional stored minimum retry backoff threshold. */
   minRetryBackoffMs?: number;
+  /** Optional stored per-provider custom failover error patterns. */
+  customFailoverPatterns?: Record<string, string[]>;
 }
 
 /** AttemptedTargetsBySession indexes per-session, per-message attempted model keys in memory. */
