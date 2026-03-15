@@ -61,6 +61,7 @@ export const runtimeSettings: RuntimeSettings = {
   stallWatchdogEnabled: false,
   globalCooldownMs: 60 * 1000,
   minRetryBackoffMs: 30 * 60 * 1000,
+  customFailoverPatterns: {},
 };
 
 let lastGlobalFailoverAt = 0;
@@ -170,6 +171,7 @@ export function resetRuntimeSettings(): void {
   runtimeSettings.stallWatchdogEnabled = false;
   runtimeSettings.globalCooldownMs = 60 * 1000;
   runtimeSettings.minRetryBackoffMs = 30 * 60 * 1000;
+  runtimeSettings.customFailoverPatterns = {};
   customModels = [];
   AVAILABLE_MODEL_IDS_BY_PROVIDER = buildAvailableModelsByProvider();
   resetGlobalFailoverState();

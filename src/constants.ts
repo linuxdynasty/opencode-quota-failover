@@ -45,3 +45,6 @@ export const FAILOVER_LOG_MAX_ENTRIES = 100;
 
 /** FAILOVER_LOG_FILE_NAME is the on-disk failover event log file name. */
 export const FAILOVER_LOG_FILE_NAME = 'failover.log';
+
+/** MIN_CUSTOM_PATTERN_LENGTH is the minimum allowed character length for custom failover patterns. */
+export const MIN_CUSTOM_PATTERN_LENGTH = 10;

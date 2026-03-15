@@ -6,6 +6,7 @@ export {
   isDefinitiveQuotaError,
   isAmbiguousRateLimitSignal,
   isProviderRequestError,
+  isCustomFailoverPattern,
   shouldTriggerFailover,
   failoverEventLog,
 } from './src/index.js';

@@ -6,6 +6,7 @@ import {
   FAILOVER_LOG_FILE_NAME,
   KNOWN_PROVIDER_IDS,
   KNOWN_TIERS,
+  MIN_CUSTOM_PATTERN_LENGTH,
   SETTINGS_FILE_NAME,
 } from './constants.js';
 import {
@@ -148,6 +149,26 @@ export async function loadRuntimeSettings(path: string): Promise<void> {
     if (Number.isFinite(parsed?.minRetryBackoffMs)) {
       runtimeSettings.minRetryBackoffMs = Math.max(0, Math.round(parsed.minRetryBackoffMs));
     }
+
+    if (parsed?.customFailoverPatterns && typeof parsed.customFailoverPatterns === 'object') {
+      const loaded: Record<string, string[]> = {};
+      for (const providerID of Object.keys(parsed.customFailoverPatterns)) {
+        const candidates = parsed.customFailoverPatterns[providerID];
+        if (Array.isArray(candidates)) {
+          const valid = candidates
+            .filter(
+              (p: unknown) =>
+                typeof p === 'string'
+                && (p as string).trim().length >= MIN_CUSTOM_PATTERN_LENGTH,
+            )
+            .map((p: string) => p.trim().toLowerCase());
+          if (valid.length > 0) {
+            loaded[providerID] = valid;
+          }
+        }
+      }
+      runtimeSettings.customFailoverPatterns = loaded;
+    }
   } catch {}
 }
 
@@ -162,6 +183,7 @@ export async function saveRuntimeSettings(path: string): Promise<void> {
     stallWatchdogEnabled: runtimeSettings.stallWatchdogEnabled,
     globalCooldownMs: runtimeSettings.globalCooldownMs,
     minRetryBackoffMs: runtimeSettings.minRetryBackoffMs,
+    customFailoverPatterns: runtimeSettings.customFailoverPatterns,
     updatedAt: new Date().toISOString(),
   };
 

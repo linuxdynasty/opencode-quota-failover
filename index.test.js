@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, shouldTriggerFailover, failoverEventLog } from "./index.js";
+import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, isCustomFailoverPattern, matchWildcardPattern, shouldTriggerFailover, failoverEventLog } from "./index.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -3643,5 +3643,344 @@ describe("opencode-quota-failover", () => {
       });
     });
   });
+
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Per-Provider Custom Failover Error Patterns
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("isCustomFailoverPattern detection", () => {
+    test("returns false when no patterns are configured for the provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        await quotaFailoverPlugin(ctx);
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "some error text" }, "anthropic")).toBe(false);
+      });
+    });
+
+    test("returns false when providerID is null", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["custom_error"] },
+          makeToolContext("detect-null-provider")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "custom_error happened" }, null)).toBe(false);
+      });
+    });
+
+    test("returns false when providerID is undefined", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["custom_error"] },
+          makeToolContext("detect-undef-provider")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "custom_error happened" }, undefined)).toBe(false);
+      });
+    });
+
+    test("returns true when error text matches a configured pattern (case-insensitive)", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["CREDIT_LIMIT_EXCEEDED"] },
+          makeToolContext("detect-match")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "credit_limit_exceeded for your account" }, "anthropic")).toBe(true);
+      });
+    });
+
+    test("returns false when error text does not match any configured pattern", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["credit_limit_exceeded"] },
+          makeToolContext("detect-no-match")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "network timeout error" }, "anthropic")).toBe(false);
+      });
+    });
+
+    test("returns false when pattern is empty string (filtered out)", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        // Only whitespace patterns should be filtered during set
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["valid_pattern"] },
+          makeToolContext("detect-empty-pattern")
+        );
+        expect(result).toContain("valid_pattern");
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "valid_pattern hit" }, "anthropic")).toBe(true);
+      });
+    });
+
+    test("patterns are provider-scoped: anthropic pattern does not match openai error", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["my_custom_signal"] },
+          makeToolContext("detect-scoped")
+        );
+        const { isCustomFailoverPattern } = await import("./index.js");
+        // Matches for anthropic
+        expect(isCustomFailoverPattern({ message: "my_custom_signal" }, "anthropic")).toBe(true);
+        // Does NOT match for openai (different provider)
+        expect(isCustomFailoverPattern({ message: "my_custom_signal" }, "openai")).toBe(false);
+      });
+    });
+  });
+
+  describe("failover_set_error_patterns tool", () => {
+    test("sets patterns for a provider and returns confirmation listing them", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["out_of_tokens", "daily_cap_hit"] },
+          makeToolContext("set-patterns-basic")
+        );
+        expect(result).toContain("Custom failover patterns updated for openai.");
+        expect(result).toContain('"out_of_tokens"');
+        expect(result).toContain('"daily_cap_hit"');
+        expect(result).toContain("Active patterns (2):");
+      });
+    });
+
+    test("appends to existing patterns by default", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["first_pattern"] },
+          makeToolContext("set-patterns-append")
+        );
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["second_pattern"] },
+          makeToolContext("set-patterns-append")
+        );
+        expect(result).toContain('"first_pattern"');
+        expect(result).toContain('"second_pattern"');
+        expect(result).toContain("Active patterns (2):");
+      });
+    });
+
+    test("deduplicates on append", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["same_pattern"] },
+          makeToolContext("set-patterns-dedup")
+        );
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["same_pattern"] },
+          makeToolContext("set-patterns-dedup")
+        );
+        expect(result).toContain("Active patterns (1):");
+      });
+    });
+
+    test("replaces existing patterns when replace: true", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["old_pattern"] },
+          makeToolContext("set-patterns-replace")
+        );
+        const result = await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["new_pattern"], replace: true },
+          makeToolContext("set-patterns-replace")
+        );
+        expect(result).toContain('"new_pattern"');
+        expect(result).not.toContain('"old_pattern"');
+        expect(result).toContain("Active patterns (1):");
+      });
+    });
+
+    test("persists patterns to settings.json", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "amazon-bedrock", patterns: ["throttlingexception", "serviceexception"] },
+          makeToolContext("set-patterns-persist")
+        );
+        const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect(saved.customFailoverPatterns?.["amazon-bedrock"]).toEqual(["throttlingexception", "serviceexception"]);
+      });
+    });
+  });
+
+  describe("failover_clear_error_patterns tool", () => {
+    test("clears patterns for a specific provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["my_error"] },
+          makeToolContext("clear-patterns-specific")
+        );
+        const result = await hooks.tool.failover_clear_error_patterns.execute(
+          { provider: "anthropic" },
+          makeToolContext("clear-patterns-specific")
+        );
+        expect(result).toContain("Custom failover patterns cleared for anthropic.");
+      });
+    });
+
+    test("reports when no patterns were set for the provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_clear_error_patterns.execute(
+          { provider: "openai" },
+          makeToolContext("clear-patterns-none")
+        );
+        expect(result).toContain("No custom failover patterns were set for openai.");
+      });
+    });
+
+    test("clears all providers when no provider argument given", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["err_a"] },
+          makeToolContext("clear-patterns-all")
+        );
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["err_b"] },
+          makeToolContext("clear-patterns-all")
+        );
+        const result = await hooks.tool.failover_clear_error_patterns.execute(
+          {},
+          makeToolContext("clear-patterns-all")
+        );
+        expect(result).toContain("All custom failover patterns cleared.");
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "err_a" }, "anthropic")).toBe(false);
+        expect(isCustomFailoverPattern({ message: "err_b" }, "openai")).toBe(false);
+      });
+    });
+
+    test("persists cleared state to settings.json", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["my_signal"] },
+          makeToolContext("clear-patterns-persist")
+        );
+        await hooks.tool.failover_clear_error_patterns.execute(
+          { provider: "anthropic" },
+          makeToolContext("clear-patterns-persist")
+        );
+        const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect((saved.customFailoverPatterns?.["anthropic"] ?? []).length).toBe(0);
+      });
+    });
+  });
+
+  describe("shouldTriggerFailover with custom patterns", () => {
+    test("returns true when custom pattern matches error text for the correct provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["account_suspended"] },
+          makeToolContext("trigger-custom-match")
+        );
+        const result = shouldTriggerFailover(
+          { message: "account_suspended: your plan has been suspended" },
+          { providerID: "openai", modelID: "gpt-5.4" }
+        );
+        expect(result).toBe(true);
+      });
+    });
+
+    test("returns false when custom pattern matches but wrong provider", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["account_suspended"] },
+          makeToolContext("trigger-custom-scope")
+        );
+        const result = shouldTriggerFailover(
+          { message: "account_suspended: your plan has been suspended" },
+          { providerID: "openai", modelID: "gpt-5.4" }
+        );
+        // anthropic pattern should NOT fire for openai provider
+        expect(result).toBe(false);
+      });
+    });
+  });
+
+  describe("custom patterns persist across plugin reload", () => {
+    test("patterns survive reload: save then reload then patterns still present", async () => {
+      await withTempSettings(async () => {
+        const { ctx: ctx1 } = createContext({});
+        const hooks1 = await quotaFailoverPlugin(ctx1);
+        await hooks1.tool.failover_set_error_patterns.execute(
+          { provider: "amazon-bedrock", patterns: ["bedrock_quota_reached"] },
+          makeToolContext("reload-persist")
+        );
+
+        // Reload plugin
+        const { ctx: ctx2 } = createContext({});
+        await quotaFailoverPlugin(ctx2);
+
+        const { isCustomFailoverPattern } = await import("./index.js");
+        expect(isCustomFailoverPattern({ message: "bedrock_quota_reached" }, "amazon-bedrock")).toBe(true);
+      });
+    });
+  });
+
+  describe("failover_status includes custom error patterns section", () => {
+    test("shows custom patterns when patterns are set", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "anthropic", patterns: ["overload_error"] },
+          makeToolContext("status-patterns-set")
+        );
+        const status = await hooks.tool.failover_status.execute(
+          { sessionID: "status-patterns-set" },
+          makeToolContext("status-patterns-set")
+        );
+        expect(status).toContain("Custom error patterns:");
+        expect(status).toContain("anthropic");
+        expect(status).toContain('"overload_error"');
+      });
+    });
+
+    test("shows 'none' when no patterns are configured", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const status = await hooks.tool.failover_status.execute(
+          { sessionID: "status-patterns-none" },
+          makeToolContext("status-patterns-none")
+        );
+        expect(status).toContain("Custom error patterns: none");
+      });
+    });
+  });
+
 
 });

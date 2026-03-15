@@ -1,10 +1,65 @@
 import type { ProviderModel } from './types.js';
+import { runtimeSettings } from './state.js';
 
 interface FailoverTriggerOptions {
   requireDefinitive?: boolean;
 }
 
 /** collectErrorDetails does normalize heterogeneous error payloads into searchable text and status code. */
+/**
+ * VALIDATION_SUPPRESSION_SIGNALS is the shared suppression list used by isDefinitiveQuotaError,
+ * isAmbiguousRateLimitSignal, and isRequestValidationError to prevent false-positive quota
+ * classification of non-retryable client-side validation errors.
+ *
+ * Category A: cross-provider non-recoverable (same payload fails everywhere — never failover)
+ *   - token/context limit exceeded (model capacity, not account quota)
+ *   - invalid request structure (bad JSON, schema mismatch, unsupported fields)
+ *   - content policy violations (prompt blocked)
+ *   - model/feature capability mismatches
+ *
+ * Category B: provider-specific serialization failures are handled separately by
+ * isProviderRequestError (Bedrock-gated) and should NOT appear here.
+ */
+const VALIDATION_SUPPRESSION_SIGNALS: string[] = [
+  // Context / token limits (model capacity — not account quota)
+  'context length',
+  'context window',
+  'token limit',
+  'too many tokens',
+  'prompt is too long',
+  'max_tokens',
+  'context_length_exceeded',
+  'request_too_large',
+
+  // Structured error type strings (Anthropic/OpenAI error.type field)
+  'invalid_request_error',
+
+  // Generic validation language
+  'validationexception',
+  'validation failed',
+  'validation error',
+
+  // HTTP 400 semantics
+  'bad request',
+
+  // Schema-level structural errors
+  'unprocessable entity',
+  'unsupported parameter',
+  'missing required',
+  'extra inputs are not permitted',
+  'unknown field',
+
+  // Content policy
+  'content_policy_violation',
+  'content policy',
+
+  // Model capability mismatch
+  'prefilling assistant messages is not supported',
+  'not supported for this model',
+  'model does not support',
+  'feature not available for this model',
+];
+
 export function collectErrorDetails(error: unknown): { text: string; statusCode: number | undefined } {
   const texts: string[] = [];
   let statusCode: number | undefined;
@@ -64,16 +119,7 @@ export function isDefinitiveQuotaError(error: unknown): boolean {
     return false;
   }
 
-  const tokenLimitSignals = [
-    'context length',
-    'context window',
-    'token limit',
-    'too many tokens',
-    'prompt is too long',
-    'max_tokens',
-    'context_length_exceeded',
-  ];
-  if (tokenLimitSignals.some((signal) => text.includes(signal))) {
+  if (VALIDATION_SUPPRESSION_SIGNALS.some((signal) => text.includes(signal))) {
     return false;
   }
 
@@ -121,16 +167,7 @@ export function isAmbiguousRateLimitSignal(error: unknown): boolean {
     return false;
   }
 
-  const tokenLimitSignals = [
-    'context length',
-    'context window',
-    'token limit',
-    'too many tokens',
-    'prompt is too long',
-    'max_tokens',
-    'context_length_exceeded',
-  ];
-  if (tokenLimitSignals.some((signal) => text.includes(signal))) {
+  if (VALIDATION_SUPPRESSION_SIGNALS.some((signal) => text.includes(signal))) {
     return false;
   }
 
@@ -207,12 +244,150 @@ export function isProviderRequestError(error: unknown): boolean {
   return requestErrorSignals.some((signal) => text.includes(signal));
 }
 
+/**
+ * matchWildcardPattern checks if text contains the pattern using glob-style '*' wildcards.
+ * Without '*', this is a plain substring match (text.includes(pattern)).
+ * With '*', segments between wildcards must appear in order in the text.
+ * Example: "billing*limit*exceeded" matches "billing hard limit was exceeded today".
+ * No regex. No start/end anchoring — all matching is substring-based.
+ */
+export function matchWildcardPattern(text: string, pattern: string): boolean {
+  if (!pattern || !text) return false;
+  if (!pattern.includes('*')) return text.includes(pattern);
+  const segments = pattern.split('*').filter((s) => s.length > 0);
+  if (segments.length === 0) return true; // Pattern is all wildcards
+  let pos = 0;
+  for (const segment of segments) {
+    const idx = text.indexOf(segment, pos);
+    if (idx === -1) return false;
+    pos = idx + segment.length;
+  }
+  return true;
+}
+
+/** isCustomFailoverPattern does check error text against per-provider user-configured substring patterns. */
+export function isCustomFailoverPattern(
+  error: unknown,
+  providerID: string | null | undefined,
+): boolean {
+  if (!providerID) return false;
+  const patterns = runtimeSettings.customFailoverPatterns[providerID];
+  if (!Array.isArray(patterns) || patterns.length === 0) return false;
+  const { text } = collectErrorDetails(error);
+  if (!text) return false;
+  return patterns.some(
+    (pattern) =>
+      typeof pattern === 'string'
+      && pattern.length > 0
+      && matchWildcardPattern(text, pattern.toLowerCase()),
+  );
+}
+
 /** shouldTriggerFailover does decide whether a failure signal should initiate failover dispatch. */
+/**
+ * isRequestValidationError detects Category A non-retryable client-side validation errors
+ * that must NEVER trigger failover. The same payload would fail on any provider, so switching
+ * providers cannot help and would only produce a duplicate error.
+ *
+ * This is the explicit fast-path guard. It is called as step 0 in shouldTriggerFailover and
+ * returns true when the error is clearly a structural/schema problem with the request itself,
+ * not a provider capacity or quota issue.
+ *
+ * Signals covered:
+ *   - Anthropic error.type == "invalid_request_error"
+ *   - OpenAI HTTP 400 with validation language
+ *   - AWS Bedrock ValidationException
+ *   - Generic HTTP 400/422 with schema, field, or format error wording
+ *   - Content policy blocks (prompt rejected — same on any provider)
+ *   - Model capability mismatches (feature not supported — same on any provider)
+ *
+ * Note: Bedrock-specific serialization failures (Category B) are NOT handled here.
+ * They are handled by isProviderRequestError (Bedrock-gated, single-hit failover may help
+ * because the same content is valid JSON on a different provider).
+ */
+export function isRequestValidationError(error: unknown): boolean {
+  const { text, statusCode } = collectErrorDetails(error);
+  if (!text) {
+    return false;
+  }
+
+  // Fast path: structured error type field is definitive
+  if (text.includes('invalid_request_error')) {
+    return true;
+  }
+
+  // AWS Bedrock ValidationException (not ServiceQuotaExceededException)
+  if (text.includes('validationexception') && !text.includes('servicequotaexceeded')) {
+    return true;
+  }
+
+  // Context/token limit — model capacity limit, not account quota
+  const contextLimitSignals = [
+    'context length',
+    'context window',
+    'token limit',
+    'too many tokens',
+    'prompt is too long',
+    'max_tokens',
+    'context_length_exceeded',
+    'request_too_large',
+  ];
+  if (contextLimitSignals.some((s) => text.includes(s))) {
+    return true;
+  }
+
+  // Schema / structural errors
+  const structuralSignals = [
+    'extra inputs are not permitted',
+    'unknown field',
+    'missing required',
+    'unsupported parameter',
+    'prefilling assistant messages is not supported',
+    'not supported for this model',
+    'model does not support',
+    'feature not available for this model',
+  ];
+  if (structuralSignals.some((s) => text.includes(s))) {
+    return true;
+  }
+
+  // Content policy blocks
+  if (text.includes('content_policy_violation') || text.includes('content policy')) {
+    return true;
+  }
+
+  // HTTP 400 / 422 with explicit validation language (but NOT Bedrock serialization prefix,
+  // which is handled by isProviderRequestError)
+  if (
+    (statusCode === 400 || statusCode === 422)
+    && !text.includes('the model returned the following errors')
+  ) {
+    const http400Signals = [
+      'validation failed',
+      'validation error',
+      'bad request',
+      'unprocessable entity',
+      'invalid request',
+      'malformed request',
+    ];
+    if (http400Signals.some((s) => text.includes(s))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function shouldTriggerFailover(
   error: unknown,
   failedModel: ProviderModel | null | undefined,
   { requireDefinitive = false }: FailoverTriggerOptions = {},
 ): boolean {
+  // Step 0: Category A validation errors — same payload fails on any provider, never failover
+  if (isRequestValidationError(error)) {
+    return false;
+  }
+
   const isQuota = requireDefinitive
     ? isDefinitiveQuotaError(error)
     : isUsageLimitError(error);
@@ -225,6 +400,10 @@ export function shouldTriggerFailover(
   }
 
   if (isBedrockModel(failedModel) && isProviderRequestError(error)) {
+    return true;
+  }
+
+  if (isCustomFailoverPattern(error, failedModel?.providerID)) {
     return true;
   }
 

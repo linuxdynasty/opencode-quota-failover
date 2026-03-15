@@ -215,6 +215,17 @@ export function buildStatusReport(sessionID: string | null | undefined, settings
     }
   }
 
+  const patternEntries = Object.entries(runtimeSettings.customFailoverPatterns ?? {})
+    .filter(([, patterns]) => Array.isArray(patterns) && (patterns as string[]).length > 0);
+  if (patternEntries.length > 0) {
+    lines.push('Custom error patterns:');
+    for (const [providerID, patterns] of patternEntries) {
+      lines.push(`  ${providerID}: ${(patterns as string[]).map((p: string) => `"${p}"`).join(', ')}`);
+    }
+  } else {
+    lines.push('Custom error patterns: none');
+  }
+
   lines.push('Quota window note: Claude Max and ChatGPT Pro subscription quota/reset windows are not exposed via plugin APIs.', 'Failover uses observed quota/rate-limit errors and retry windows.', '', `Log file: ${join(dirname(settingsPath), FAILOVER_LOG_FILE_NAME)}`);
   if (failoverEventLog.length > 0) {
     const recentCount = Math.min(failoverEventLog.length, 15);
