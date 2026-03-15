@@ -1117,9 +1117,9 @@ describe("opencode-quota-failover", () => {
     expect(debugMessages.some((message) => message.includes("failover.dispatch"))).toBe(true);
   });
 
-  test("all configured oh-my-opencode agents preserve agent and map to correct Bedrock fallback tier", async () => {
+  test("fixture oh-my-opencode agents preserve agent and map to correct Bedrock fallback tier", async () => {
     const __dirname = dirname(fileURLToPath(import.meta.url));
-    const configPath = resolve(__dirname, "../../oh-my-opencode.json");
+    const configPath = resolve(__dirname, "./fixtures/oh-my-opencode.json");
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     const agents = config.agents ?? {};
     const configuredAgentNames = Object.keys(agents);
@@ -2075,6 +2075,39 @@ describe("opencode-quota-failover", () => {
     });
 
     expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.model.providerID).toBe("openai");
+  });
+
+  test("session.error infers failed model from session messages when assistant stats are missing", async () => {
+    const sessionID = "s-bedrock-invalid-json-se-no-stats";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-bedrock-invalid-json-se-no-stats",
+          agent: "sisyphus",
+          providerID: "amazon-bedrock",
+          modelID: "us.anthropic.claude-opus-4-6-v1"
+        })
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID,
+          error: { message: "The model returned the following errors: The request body is not valid JSON." }
+        }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.agent).toBe("sisyphus");
     expect(promptCalls[0].body.model.providerID).toBe("openai");
   });
 
@@ -3926,6 +3959,50 @@ describe("opencode-quota-failover", () => {
         );
         // anthropic pattern should NOT fire for openai provider
         expect(result).toBe(false);
+      });
+    });
+
+    test("message.updated triggers failover when global '*' custom pattern matches", async () => {
+      await withTempSettings(async () => {
+        const sessionID = "s-global-custom-pattern";
+        const messagesBySession = {
+          [sessionID]: [
+            makeUserMessage(sessionID, {
+              id: "u-global-custom-pattern",
+              agent: "sisyphus",
+              providerID: "anthropic",
+              modelID: "claude-opus-4-6"
+            }),
+            makeAssistantErrorMessage(
+              sessionID,
+              "anthropic",
+              "claude-opus-4-6",
+              "Provider policy billing review hold prevented this request.",
+              429,
+              "a-global-custom-pattern"
+            )
+          ]
+        };
+        const { ctx, promptCalls } = createContext(messagesBySession);
+        const hooks = await quotaFailoverPlugin(ctx);
+
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "*", pattern: "policy*billing*review*hold" },
+          makeToolContext("global-custom-pattern")
+        );
+
+        await hooks.event({
+          event: {
+            type: "message.updated",
+            properties: { info: messagesBySession[sessionID][1].info }
+          }
+        });
+        await hooks.event({
+          event: { type: "session.idle", properties: { sessionID } }
+        });
+
+        expect(promptCalls).toHaveLength(1);
+        expect(promptCalls[0].body.model.providerID).toBe("amazon-bedrock");
       });
     });
   });
