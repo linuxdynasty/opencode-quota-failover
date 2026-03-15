@@ -1,0 +1,23 @@
+src/detection.ts
+  2d7322916a532320 247,249-253,255-267
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.12",
+  "base_commit_sha": "30d89ebb3fb9d841433148e486c51ec8d37d8f4f",
+  "prompts": {
+    "2d7322916a532320": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310ee630affeHA5FYPg6tuLbfl-43f0bfc4-3794-42db-a53d-7304f777aff7",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 21,
+      "total_deletions": 0,
+      "accepted_lines": 19,
+      "overriden_lines": 2
+    }
+  }
+}
