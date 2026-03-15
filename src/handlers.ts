@@ -141,6 +141,7 @@ export function createEventHandler(ctx: any) {
           !info.error
           || !shouldTriggerFailover(info.error, failedModel, {
             requireDefinitive: true,
+            customPatterns: runtimeSettings.customFailoverPatterns,
           })
         ) {
           return;
@@ -208,7 +209,9 @@ export function createEventHandler(ctx: any) {
                 modelID: lastAssistant.modelID,
               }
             : null;
-        if (!shouldTriggerFailover(retryMessage, failedModel)) {
+        if (!shouldTriggerFailover(retryMessage, failedModel, {
+          customPatterns: runtimeSettings.customFailoverPatterns,
+        })) {
           return;
         }
 
@@ -266,6 +269,7 @@ export function createEventHandler(ctx: any) {
           || !error
           || !shouldTriggerFailover(error, failedModel, {
             requireDefinitive: true,
+            customPatterns: runtimeSettings.customFailoverPatterns,
           })
         ) {
           return;

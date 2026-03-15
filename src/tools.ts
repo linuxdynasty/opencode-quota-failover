@@ -1,11 +1,13 @@
 import { tool } from '@opencode-ai/plugin';
 import { availableModelIDsForProvider, addModelToProviderCatalog, buildModelCatalogReport, canonicalModelID, fallbackSummaryByTier, getSelectionWarningNotes, inferTierFromModel, normalizeCustomModelEntry, normalizeProviderList, providerChainSummary, providerTierSummary, sameCustomModelKey } from './models.js';
-import { KNOWN_TIERS, MIN_CUSTOM_ERROR_PATTERN_LENGTH } from './constants.js';
+import { CUSTOM_PATTERN_WILDCARD, KNOWN_PROVIDER_IDS, KNOWN_TIERS, MIN_CUSTOM_PATTERN_LENGTH } from './constants.js';
 import { runtimeSettings, getCustomModels } from './state.js';
 import { saveRuntimeSettings } from './settings.js';
 import { runManualFailover } from './failover.js';
-import { validateCustomPattern } from './detection.js';
+import { normalizeCustomPattern, validateCustomPattern } from './detection.js';
 import { buildStatusReport } from './reporting.js';
+
+const PATTERN_PROVIDER_ENUM = [...KNOWN_PROVIDER_IDS, CUSTOM_PATTERN_WILDCARD] as const;
 
 /** createTools does build MCP tool definitions bound to plugin runtime context. */
 export function createTools(ctx: any, settingsPath: string) {
@@ -250,12 +252,12 @@ export function createTools(ctx: any, settingsPath: string) {
       description: 'Set custom error message substring patterns that trigger failover for a provider.',
       args: {
         provider: tool.schema
-          .enum(['amazon-bedrock', 'openai', 'anthropic'])
+          .enum(PATTERN_PROVIDER_ENUM)
           .describe('Provider to configure patterns for'),
         patterns: tool.schema
           .array(tool.schema.string().min(1))
           .min(1)
-          .describe(`Substring/wildcard patterns to match in error messages (case-insensitive, min ${MIN_CUSTOM_ERROR_PATTERN_LENGTH} non-wildcard chars)`),
+          .describe(`Substring/wildcard patterns to match in error messages (case-insensitive, min ${MIN_CUSTOM_PATTERN_LENGTH} non-wildcard chars)`),
         replace: tool.schema
           .boolean()
           .optional()
@@ -264,7 +266,7 @@ export function createTools(ctx: any, settingsPath: string) {
       async execute(args) {
         const providerID = args.provider;
         const normalized = args.patterns
-          .map((p: string) => p.trim().toLowerCase())
+          .map((p: string) => normalizeCustomPattern(p))
           .filter((p: string) => p.length > 0);
         if (normalized.length === 0) {
           return 'No valid patterns provided.';
@@ -292,7 +294,11 @@ export function createTools(ctx: any, settingsPath: string) {
         const merged = args.replace
           ? [...new Set(accepted)]
           : [...new Set([...existing, ...accepted])];
-        runtimeSettings.customFailoverPatterns[providerID] = merged;
+        if (merged.length === 0) {
+          delete runtimeSettings.customFailoverPatterns[providerID];
+        } else {
+          runtimeSettings.customFailoverPatterns[providerID] = merged;
+        }
         await saveRuntimeSettings(settingsPath).catch(() => {});
 
         const lines = [
@@ -310,14 +316,14 @@ export function createTools(ctx: any, settingsPath: string) {
       description: 'Clear custom error message patterns for a provider, or all providers.',
       args: {
         provider: tool.schema
-          .enum(['amazon-bedrock', 'openai', 'anthropic'])
+          .enum(PATTERN_PROVIDER_ENUM)
           .optional()
           .describe('Provider to clear. If omitted, clears all providers.'),
       },
       async execute(args) {
         if (args.provider) {
           const hadPatterns = (runtimeSettings.customFailoverPatterns[args.provider] ?? []).length > 0;
-          runtimeSettings.customFailoverPatterns[args.provider] = [];
+          delete runtimeSettings.customFailoverPatterns[args.provider];
           await saveRuntimeSettings(settingsPath).catch(() => {});
           return hadPatterns
             ? `Custom failover patterns cleared for ${args.provider}.`
@@ -332,16 +338,16 @@ export function createTools(ctx: any, settingsPath: string) {
       description: 'Add one custom error pattern for a provider. Supports wildcard * matching.',
       args: {
         provider: tool.schema
-          .enum(['amazon-bedrock', 'openai', 'anthropic'])
+          .enum(PATTERN_PROVIDER_ENUM)
           .describe('Provider to configure pattern for'),
         pattern: tool.schema
           .string()
           .min(1)
-          .describe(`Error substring or wildcard pattern (min ${MIN_CUSTOM_ERROR_PATTERN_LENGTH} non-wildcard chars)`),
+          .describe(`Error substring or wildcard pattern (min ${MIN_CUSTOM_PATTERN_LENGTH} non-wildcard chars)`),
       },
       async execute(args) {
         const providerID = args.provider;
-        const normalized = args.pattern.trim().toLowerCase();
+        const normalized = normalizeCustomPattern(args.pattern);
         const validation = validateCustomPattern(normalized);
         if (!validation.valid) {
           return `Pattern rejected: ${validation.reason}`;
@@ -366,7 +372,7 @@ export function createTools(ctx: any, settingsPath: string) {
       description: 'Remove one custom error pattern for a provider.',
       args: {
         provider: tool.schema
-          .enum(['amazon-bedrock', 'openai', 'anthropic'])
+          .enum(PATTERN_PROVIDER_ENUM)
           .describe('Provider to remove pattern from'),
         pattern: tool.schema
           .string()
@@ -375,7 +381,7 @@ export function createTools(ctx: any, settingsPath: string) {
       },
       async execute(args) {
         const providerID = args.provider;
-        const normalized = args.pattern.trim().toLowerCase();
+        const normalized = normalizeCustomPattern(args.pattern);
         const existing = runtimeSettings.customFailoverPatterns[providerID] ?? [];
         const next = existing.filter((pattern: string) => pattern !== normalized);
         if (next.length === existing.length) {
@@ -395,14 +401,14 @@ export function createTools(ctx: any, settingsPath: string) {
       description: 'List configured custom failover error patterns by provider.',
       args: {
         provider: tool.schema
-          .enum(['amazon-bedrock', 'openai', 'anthropic'])
+          .enum(PATTERN_PROVIDER_ENUM)
           .optional()
           .describe('Optional provider filter'),
       },
       async execute(args) {
         const providers = args.provider
           ? [args.provider]
-          : ['amazon-bedrock', 'openai', 'anthropic'];
+          : [...KNOWN_PROVIDER_IDS, CUSTOM_PATTERN_WILDCARD];
         const lines: string[] = [];
         for (const providerID of providers) {
           const patterns = runtimeSettings.customFailoverPatterns[providerID] ?? [];

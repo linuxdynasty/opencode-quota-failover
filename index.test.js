@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, isCustomFailoverPattern, matchesWildcardPattern, shouldTriggerFailover, failoverEventLog } from "./index.js";
+import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, isCustomFailoverPattern, matchesWildcardPattern, matchWildcardPattern, validateCustomPattern, shouldTriggerFailover, failoverEventLog } from "./index.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -3965,7 +3965,7 @@ describe("opencode-quota-failover", () => {
           { provider: "openai", pattern: "short" },
           makeToolContext("new-add-short")
         );
-        expect(result).toContain("Minimum length is 10");
+        expect(result).toContain("at least 10");
       });
     });
 
@@ -4095,7 +4095,7 @@ describe("opencode-quota-failover", () => {
           { provider: "openai", pattern: "short" },
           makeToolContext("add-pattern-short")
         );
-        expect(result).toContain("Pattern too short");
+        expect(result).toContain("at least 10");
       });
     });
 
@@ -4159,7 +4159,7 @@ describe("opencode-quota-failover", () => {
           makeToolContext("wildcard-order")
         );
         const result = shouldTriggerFailover(
-          { message: "limit reached before billing and never exceeded" },
+          { message: "zreached before zbilling and never zexceeded" },
           { providerID: "openai", modelID: "gpt-5.4" }
         );
         expect(result).toBe(false);
@@ -4167,5 +4167,208 @@ describe("opencode-quota-failover", () => {
     });
   });
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // matchesWildcardPattern Unit Tests
+  // ─────────────────────────────────────────────────────────────────────────────
 
+  describe("matchesWildcardPattern unit tests", () => {
+    test("returns false for empty text", () => {
+      expect(matchesWildcardPattern("", "hello")).toBe(false);
+    });
+
+    test("returns false for empty pattern", () => {
+      expect(matchesWildcardPattern("say hello world", "")).toBe(false);
+    });
+
+    test("returns false for both empty", () => {
+      expect(matchesWildcardPattern("", "")).toBe(false);
+    });
+
+    test("plain substring match (no wildcard)", () => {
+      expect(matchesWildcardPattern("say hello world", "hello")).toBe(true);
+    });
+
+    test("plain substring no match", () => {
+      expect(matchesWildcardPattern("hello", "goodbye")).toBe(false);
+    });
+
+    test("single * wildcard matches", () => {
+      expect(matchesWildcardPattern("billing limit exceeded", "billing*exceeded")).toBe(true);
+    });
+
+    test("single * wildcard no match", () => {
+      expect(matchesWildcardPattern("exceeded before billing", "billing*exceeded")).toBe(false);
+    });
+
+    test("multiple * wildcards match", () => {
+      expect(matchesWildcardPattern("alpha bravo charlie", "a*b*c")).toBe(true);
+    });
+
+    test("multiple * wildcards no match when segments out of order", () => {
+      expect(matchesWildcardPattern("charlie bravo alpha", "a*b*c")).toBe(false);
+    });
+
+    test("pattern that is all wildcards matches any non-empty text", () => {
+      expect(matchesWildcardPattern("anything", "***")).toBe(true);
+    });
+
+    test("pattern that is all wildcards returns false for empty text", () => {
+      expect(matchesWildcardPattern("", "***")).toBe(false);
+    });
+
+    test("leading wildcard matches", () => {
+      expect(matchesWildcardPattern("quota exceeded", "*exceeded")).toBe(true);
+    });
+
+    test("trailing wildcard matches", () => {
+      expect(matchesWildcardPattern("quota limit", "quota*")).toBe(true);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // validateCustomPattern Unit Tests
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("validateCustomPattern unit tests", () => {
+    test("rejects empty string", () => {
+      expect(validateCustomPattern("")).toEqual({
+        valid: false,
+        reason: expect.any(String),
+      });
+    });
+
+    test("rejects string shorter than 10 non-wildcard chars", () => {
+      expect(validateCustomPattern("short")).toEqual({
+        valid: false,
+        reason: expect.stringContaining("10"),
+      });
+    });
+
+    test("rejects wildcard-only pattern (no literal chars)", () => {
+      expect(validateCustomPattern("***")).toEqual({
+        valid: false,
+        reason: expect.stringContaining("10"),
+      });
+    });
+
+    test("rejects pattern where non-wildcard chars are under 10", () => {
+      expect(validateCustomPattern("abc*def")).toEqual({
+        valid: false,
+        reason: expect.any(String),
+      });
+    });
+
+    test("accepts pattern with exactly 10 non-wildcard chars", () => {
+      expect(validateCustomPattern("1234567890")).toEqual({ valid: true });
+    });
+
+    test("accepts wildcard pattern with enough literal chars", () => {
+      expect(validateCustomPattern("billing*limit*exceeded")).toEqual({ valid: true });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // failover_add_error_pattern Additional Coverage
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("failover_add_error_pattern additional coverage", () => {
+    test("rejects duplicate pattern with exact message", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "unique_long_pattern" },
+          makeToolContext("add-dup")
+        );
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "unique_long_pattern" },
+          makeToolContext("add-dup")
+        );
+        expect(result).toContain("already exists");
+      });
+    });
+
+    test("rejects pattern with fewer than 10 non-wildcard chars even with wildcards", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "ab*cd*ef" },
+          makeToolContext("add-wildcard-short")
+        );
+        expect(result).toContain("rejected");
+      });
+    });
+
+    test("adds pattern with wildcards when literal chars are sufficient", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "billing*limit*exceeded" },
+          makeToolContext("add-wildcard-ok")
+        );
+        expect(result).toContain("Custom failover pattern added");
+      });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // failover_remove_error_pattern Additional Coverage
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("failover_remove_error_pattern additional coverage", () => {
+    test("returns not-found message for non-existent pattern", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_remove_error_pattern.execute(
+          { provider: "openai", pattern: "does_not_exist_pattern" },
+          makeToolContext("remove-notfound")
+        );
+        expect(result).toContain("Pattern not found");
+      });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // failover_list_error_patterns Additional Coverage
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe("failover_list_error_patterns additional coverage", () => {
+    test("returns empty message for specific provider with no patterns", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_list_error_patterns.execute(
+          { provider: "openai" },
+          makeToolContext("list-empty-provider")
+        );
+        expect(result).toContain("No custom failover error patterns configured for openai");
+      });
+    });
+
+    test("lists patterns from multiple providers when no filter given", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "openai_specific_error" },
+          makeToolContext("list-multi")
+        );
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "anthropic", pattern: "anthropic_specific_error" },
+          makeToolContext("list-multi")
+        );
+        const result = await hooks.tool.failover_list_error_patterns.execute(
+          {},
+          makeToolContext("list-multi")
+        );
+        expect(result).toContain("openai");
+        expect(result).toContain("anthropic");
+        expect(result).toContain("openai_specific_error");
+        expect(result).toContain("anthropic_specific_error");
+      });
+    });
+  });
 });

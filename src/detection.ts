@@ -1,9 +1,10 @@
 import type { ProviderModel } from './types.js';
-import { MIN_CUSTOM_PATTERN_LENGTH } from './constants.js';
+import { CUSTOM_PATTERN_WILDCARD, MIN_CUSTOM_PATTERN_LENGTH } from './constants.js';
 import { runtimeSettings } from './state.js';
 
 interface FailoverTriggerOptions {
   requireDefinitive?: boolean;
+  customPatterns?: Record<string, string[] | undefined>;
 }
 
 /** collectErrorDetails does normalize heterogeneous error payloads into searchable text and status code. */
@@ -266,17 +267,24 @@ export function matchesWildcardPattern(text: string, pattern: string): boolean {
   return true;
 }
 
+export function normalizeCustomPattern(pattern: unknown): string {
+  if (typeof pattern !== 'string') {
+    return '';
+  }
+  return pattern.trim().toLowerCase();
+}
+
 export function validateCustomPattern(pattern: string): { valid: boolean; reason?: string } {
   if (typeof pattern !== 'string') {
     return { valid: false, reason: 'Pattern must be a string.' };
   }
 
-  const trimmed = pattern.trim();
+  const trimmed = normalizeCustomPattern(pattern);
   if (trimmed.length === 0) {
     return { valid: false, reason: 'Pattern must not be empty.' };
   }
 
-  const literalLength = trimmed.replace(/\*/g, '').length;
+  const literalLength = trimmed.split(CUSTOM_PATTERN_WILDCARD).join('').length;
   if (literalLength < MIN_CUSTOM_PATTERN_LENGTH) {
     return {
       valid: false,
@@ -293,9 +301,12 @@ export const matchWildcardPattern = matchesWildcardPattern;
 export function isCustomFailoverPattern(
   error: unknown,
   providerID: string | null | undefined,
+  customPatterns: Record<string, string[] | undefined> = runtimeSettings.customFailoverPatterns as Record<string, string[] | undefined>,
 ): boolean {
   if (!providerID) return false;
-  const patterns = runtimeSettings.customFailoverPatterns[providerID];
+  const providerPatterns = customPatterns[providerID] ?? [];
+  const wildcardPatterns = customPatterns['*'] ?? [];
+  const patterns = [...providerPatterns, ...wildcardPatterns];
   if (!Array.isArray(patterns) || patterns.length === 0) return false;
   const { text } = collectErrorDetails(error);
   if (!text) return false;
@@ -303,7 +314,7 @@ export function isCustomFailoverPattern(
     (pattern) =>
       typeof pattern === 'string'
       && pattern.length > 0
-      && matchesWildcardPattern(text, pattern.toLowerCase()),
+      && matchesWildcardPattern(text, normalizeCustomPattern(pattern)),
   );
 }
 
@@ -405,7 +416,10 @@ export function isRequestValidationError(error: unknown): boolean {
 export function shouldTriggerFailover(
   error: unknown,
   failedModel: ProviderModel | null | undefined,
-  { requireDefinitive = false }: FailoverTriggerOptions = {},
+  {
+    requireDefinitive = false,
+    customPatterns,
+  }: FailoverTriggerOptions = {},
 ): boolean {
   // Step 0: Category A validation errors — same payload fails on any provider, never failover
   if (isRequestValidationError(error)) {
@@ -427,7 +441,7 @@ export function shouldTriggerFailover(
     return true;
   }
 
-  if (isCustomFailoverPattern(error, failedModel?.providerID)) {
+  if (isCustomFailoverPattern(error, failedModel?.providerID, customPatterns)) {
     return true;
   }
 
