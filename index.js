@@ -7,6 +7,7 @@ export {
   isAmbiguousRateLimitSignal,
   isProviderRequestError,
   isCustomFailoverPattern,
+  matchWildcardPattern,
   shouldTriggerFailover,
   failoverEventLog,
 } from './src/index.js';
