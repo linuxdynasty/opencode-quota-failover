@@ -6,7 +6,6 @@ import {
   FAILOVER_LOG_FILE_NAME,
   KNOWN_PROVIDER_IDS,
   KNOWN_TIERS,
-  MIN_CUSTOM_PATTERN_LENGTH,
   SETTINGS_FILE_NAME,
 } from './constants.js';
 import {
@@ -22,9 +21,40 @@ import {
   normalizeProviderList,
   sameCustomModelKey,
 } from './models.js';
+import { validateCustomPattern } from './detection.js';
 import { recordFailoverEvent } from './reporting.js';
 
 const DEFAULT_MODEL_BY_PROVIDER_AND_TIER = buildDefaultProviderTierMatrix();
+
+function normalizeCustomFailoverPatterns(input: unknown): Record<string, string[]> {
+  const normalized: Record<string, string[]> = {};
+  if (!input || typeof input !== 'object') {
+    return normalized;
+  }
+
+  for (const providerID of Object.keys(input as Record<string, unknown>)) {
+    const candidates = (input as Record<string, unknown>)[providerID];
+    if (!Array.isArray(candidates)) {
+      continue;
+    }
+
+    const valid = [...new Set(
+      candidates
+        .filter((p: unknown) => typeof p === 'string')
+        .map((p: string) => p.trim().toLowerCase())
+        .filter((p: string) => {
+          const result = validateCustomPattern(p);
+          return result.valid;
+        }),
+    )];
+
+    if (valid.length > 0) {
+      normalized[providerID] = valid;
+    }
+  }
+
+  return normalized;
+}
 
 /** settingsPathForRuntime does resolve the settings file path for the current runtime. */
 export function settingsPathForRuntime(): string {
@@ -151,23 +181,7 @@ export async function loadRuntimeSettings(path: string): Promise<void> {
     }
 
     if (parsed?.customFailoverPatterns && typeof parsed.customFailoverPatterns === 'object') {
-      const loaded: Record<string, string[]> = {};
-      for (const providerID of Object.keys(parsed.customFailoverPatterns)) {
-        const candidates = parsed.customFailoverPatterns[providerID];
-        if (Array.isArray(candidates)) {
-          const valid = candidates
-            .filter(
-              (p: unknown) =>
-                typeof p === 'string'
-                && (p as string).trim().length >= MIN_CUSTOM_PATTERN_LENGTH,
-            )
-            .map((p: string) => p.trim().toLowerCase());
-          if (valid.length > 0) {
-            loaded[providerID] = valid;
-          }
-        }
-      }
-      runtimeSettings.customFailoverPatterns = loaded;
+      runtimeSettings.customFailoverPatterns = normalizeCustomFailoverPatterns(parsed.customFailoverPatterns);
     }
   } catch {}
 }
@@ -183,7 +197,7 @@ export async function saveRuntimeSettings(path: string): Promise<void> {
     stallWatchdogEnabled: runtimeSettings.stallWatchdogEnabled,
     globalCooldownMs: runtimeSettings.globalCooldownMs,
     minRetryBackoffMs: runtimeSettings.minRetryBackoffMs,
-    customFailoverPatterns: runtimeSettings.customFailoverPatterns,
+    customFailoverPatterns: normalizeCustomFailoverPatterns(runtimeSettings.customFailoverPatterns),
     updatedAt: new Date().toISOString(),
   };
 

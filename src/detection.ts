@@ -1,4 +1,5 @@
 import type { ProviderModel } from './types.js';
+import { MIN_CUSTOM_PATTERN_LENGTH } from './constants.js';
 import { runtimeSettings } from './state.js';
 
 interface FailoverTriggerOptions {
@@ -245,13 +246,13 @@ export function isProviderRequestError(error: unknown): boolean {
 }
 
 /**
- * matchWildcardPattern checks if text contains the pattern using glob-style '*' wildcards.
+ * matchesWildcardPattern checks if text contains the pattern using glob-style '*' wildcards.
  * Without '*', this is a plain substring match (text.includes(pattern)).
  * With '*', segments between wildcards must appear in order in the text.
  * Example: "billing*limit*exceeded" matches "billing hard limit was exceeded today".
  * No regex. No start/end anchoring — all matching is substring-based.
  */
-export function matchWildcardPattern(text: string, pattern: string): boolean {
+export function matchesWildcardPattern(text: string, pattern: string): boolean {
   if (!pattern || !text) return false;
   if (!pattern.includes('*')) return text.includes(pattern);
   const segments = pattern.split('*').filter((s) => s.length > 0);
@@ -264,6 +265,29 @@ export function matchWildcardPattern(text: string, pattern: string): boolean {
   }
   return true;
 }
+
+export function validateCustomPattern(pattern: string): { valid: boolean; reason?: string } {
+  if (typeof pattern !== 'string') {
+    return { valid: false, reason: 'Pattern must be a string.' };
+  }
+
+  const trimmed = pattern.trim();
+  if (trimmed.length === 0) {
+    return { valid: false, reason: 'Pattern must not be empty.' };
+  }
+
+  const literalLength = trimmed.replace(/\*/g, '').length;
+  if (literalLength < MIN_CUSTOM_PATTERN_LENGTH) {
+    return {
+      valid: false,
+      reason: `Pattern must contain at least ${MIN_CUSTOM_PATTERN_LENGTH} non-wildcard literal characters.`,
+    };
+  }
+
+  return { valid: true };
+}
+
+export const matchWildcardPattern = matchesWildcardPattern;
 
 /** isCustomFailoverPattern does check error text against per-provider user-configured substring patterns. */
 export function isCustomFailoverPattern(
@@ -279,7 +303,7 @@ export function isCustomFailoverPattern(
     (pattern) =>
       typeof pattern === 'string'
       && pattern.length > 0
-      && matchWildcardPattern(text, pattern.toLowerCase()),
+      && matchesWildcardPattern(text, pattern.toLowerCase()),
   );
 }
 

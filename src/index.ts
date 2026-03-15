@@ -4,7 +4,8 @@ import {
   isAmbiguousRateLimitSignal,
   isProviderRequestError,
   isCustomFailoverPattern,
-  matchWildcardPattern,
+  matchesWildcardPattern,
+  normalizeCustomPattern,
   shouldTriggerFailover,
 } from './detection.js';
 import {
@@ -16,7 +17,7 @@ import { loadRuntimeSettings, settingsPathForRuntime } from './settings.js';
 import { failoverEventLog, resetRuntimeSettings } from './state.js';
 import { createTools } from './tools.js';
 
-export { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, isCustomFailoverPattern, matchWildcardPattern, shouldTriggerFailover };
+export { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, isCustomFailoverPattern, matchesWildcardPattern, normalizeCustomPattern, shouldTriggerFailover };
 export { failoverEventLog };
 
 /** quotaFailoverPlugin does initialize runtime settings and bind plugin handlers. */

@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, isCustomFailoverPattern, matchWildcardPattern, shouldTriggerFailover, failoverEventLog } from "./index.js";
+import quotaFailoverPlugin, { isUsageLimitError, isDefinitiveQuotaError, isAmbiguousRateLimitSignal, isProviderRequestError, isCustomFailoverPattern, matchesWildcardPattern, shouldTriggerFailover, failoverEventLog } from "./index.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -3831,7 +3831,7 @@ describe("opencode-quota-failover", () => {
         const { ctx } = createContext({});
         const hooks = await quotaFailoverPlugin(ctx);
         await hooks.tool.failover_set_error_patterns.execute(
-          { provider: "anthropic", patterns: ["my_error"] },
+          { provider: "anthropic", patterns: ["my_error_code"] },
           makeToolContext("clear-patterns-specific")
         );
         const result = await hooks.tool.failover_clear_error_patterns.execute(
@@ -3859,11 +3859,11 @@ describe("opencode-quota-failover", () => {
         const { ctx } = createContext({});
         const hooks = await quotaFailoverPlugin(ctx);
         await hooks.tool.failover_set_error_patterns.execute(
-          { provider: "anthropic", patterns: ["err_a"] },
+          { provider: "anthropic", patterns: ["err_a_long"] },
           makeToolContext("clear-patterns-all")
         );
         await hooks.tool.failover_set_error_patterns.execute(
-          { provider: "openai", patterns: ["err_b"] },
+          { provider: "openai", patterns: ["err_b_long"] },
           makeToolContext("clear-patterns-all")
         );
         const result = await hooks.tool.failover_clear_error_patterns.execute(
@@ -3872,8 +3872,8 @@ describe("opencode-quota-failover", () => {
         );
         expect(result).toContain("All custom failover patterns cleared.");
         const { isCustomFailoverPattern } = await import("./index.js");
-        expect(isCustomFailoverPattern({ message: "err_a" }, "anthropic")).toBe(false);
-        expect(isCustomFailoverPattern({ message: "err_b" }, "openai")).toBe(false);
+        expect(isCustomFailoverPattern({ message: "err_a_long" }, "anthropic")).toBe(false);
+        expect(isCustomFailoverPattern({ message: "err_b_long" }, "openai")).toBe(false);
       });
     });
 
@@ -3882,7 +3882,7 @@ describe("opencode-quota-failover", () => {
         const { ctx } = createContext({});
         const hooks = await quotaFailoverPlugin(ctx);
         await hooks.tool.failover_set_error_patterns.execute(
-          { provider: "anthropic", patterns: ["my_signal"] },
+          { provider: "anthropic", patterns: ["my_signal_long"] },
           makeToolContext("clear-patterns-persist")
         );
         await hooks.tool.failover_clear_error_patterns.execute(
@@ -3950,6 +3950,96 @@ describe("opencode-quota-failover", () => {
     });
   });
 
+  describe("new custom error pattern tools", () => {
+    test("matchWildcardPattern supports wildcard matching", () => {
+      expect(matchWildcardPattern("quota exceeded for account", "quota*account")).toBe(true);
+      expect(matchWildcardPattern("quota exceeded for account", "*exceeded*")).toBe(true);
+      expect(matchWildcardPattern("quota exceeded", "billing*limit")).toBe(false);
+    });
+
+    test("failover_add_error_pattern enforces minimum length", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "short" },
+          makeToolContext("new-add-short")
+        );
+        expect(result).toContain("Minimum length is 10");
+      });
+    });
+
+    test("failover_add_error_pattern lowercases and persists pattern", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "ACCOUNT_SUSPENDED_LONG" },
+          makeToolContext("new-add-persist")
+        );
+        const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect(saved.customFailoverPatterns?.openai).toContain("account_suspended_long");
+      });
+    });
+
+    test("failover_remove_error_pattern removes a pattern", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "remove_me_pattern" },
+          makeToolContext("new-remove")
+        );
+        const result = await hooks.tool.failover_remove_error_pattern.execute(
+          { provider: "openai", pattern: "REMOVE_ME_PATTERN" },
+          makeToolContext("new-remove")
+        );
+        expect(result).toContain('Pattern removed for openai: "remove_me_pattern"');
+      });
+    });
+
+    test("failover_list_error_patterns lists configured patterns", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "anthropic", pattern: "listable_pattern_long" },
+          makeToolContext("new-list")
+        );
+        const result = await hooks.tool.failover_list_error_patterns.execute(
+          {},
+          makeToolContext("new-list")
+        );
+        expect(result).toContain("Custom failover error patterns:");
+        expect(result).toContain("anthropic");
+        expect(result).toContain('"listable_pattern_long"');
+      });
+    });
+
+    test("loadRuntimeSettings lowercases and filters short custom patterns", async () => {
+      await withTempSettings(async (settingsPath) => {
+        writeFileSync(
+          settingsPath,
+          JSON.stringify(
+            {
+              customFailoverPatterns: {
+                openai: ["short", "VALID_LONG_PATTERN"]
+              }
+            },
+            null,
+            2
+          )
+        );
+
+        const { ctx } = createContext({});
+        await quotaFailoverPlugin(ctx);
+
+        expect(isCustomFailoverPattern({ message: "valid_long_pattern" }, "openai")).toBe(true);
+        expect(isCustomFailoverPattern({ message: "short" }, "openai")).toBe(false);
+      });
+    });
+  });
+
   describe("failover_status includes custom error patterns section", () => {
     test("shows custom patterns when patterns are set", async () => {
       await withTempSettings(async () => {
@@ -3978,6 +4068,101 @@ describe("opencode-quota-failover", () => {
           makeToolContext("status-patterns-none")
         );
         expect(status).toContain("Custom error patterns: none");
+      });
+    });
+  });
+
+  describe("custom error pattern v2 tools", () => {
+    test("failover_add_error_pattern adds and lowercases a pattern", async () => {
+      await withTempSettings(async (settingsPath) => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "ACCOUNT*RATE*LIMIT SIGNAL" },
+          makeToolContext("add-pattern")
+        );
+        expect(result).toContain("Custom failover pattern added for openai.");
+        const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+        expect(saved.customFailoverPatterns?.openai).toEqual(["account*rate*limit signal"]);
+      });
+    });
+
+    test("failover_add_error_pattern enforces minimum length", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        const result = await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "short" },
+          makeToolContext("add-pattern-short")
+        );
+        expect(result).toContain("Pattern too short");
+      });
+    });
+
+    test("failover_remove_error_pattern removes one pattern", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "openai", pattern: "remove this pattern" },
+          makeToolContext("remove-pattern")
+        );
+        const result = await hooks.tool.failover_remove_error_pattern.execute(
+          { provider: "openai", pattern: "REMOVE THIS PATTERN" },
+          makeToolContext("remove-pattern")
+        );
+        expect(result).toContain("Pattern removed for openai");
+      });
+    });
+
+    test("failover_list_error_patterns lists configured patterns", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_add_error_pattern.execute(
+          { provider: "anthropic", pattern: "listable pattern here" },
+          makeToolContext("list-pattern")
+        );
+        const result = await hooks.tool.failover_list_error_patterns.execute(
+          { provider: "anthropic" },
+          makeToolContext("list-pattern")
+        );
+        expect(result).toContain("anthropic (1):");
+        expect(result).toContain("listable pattern here");
+      });
+    });
+  });
+
+  describe("custom wildcard matching", () => {
+    test("supports * wildcard with ordered segments", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["billing*limit*exceeded"] },
+          makeToolContext("wildcard-match")
+        );
+        const result = shouldTriggerFailover(
+          { message: "customer billing hard limit has exceeded threshold" },
+          { providerID: "openai", modelID: "gpt-5.4" }
+        );
+        expect(result).toBe(true);
+      });
+    });
+
+    test("does not match when wildcard segments appear out of order", async () => {
+      await withTempSettings(async () => {
+        const { ctx } = createContext({});
+        const hooks = await quotaFailoverPlugin(ctx);
+        await hooks.tool.failover_set_error_patterns.execute(
+          { provider: "openai", patterns: ["billing*limit*exceeded"] },
+          makeToolContext("wildcard-order")
+        );
+        const result = shouldTriggerFailover(
+          { message: "limit reached before billing and never exceeded" },
+          { providerID: "openai", modelID: "gpt-5.4" }
+        );
+        expect(result).toBe(false);
       });
     });
   });

@@ -1,9 +1,10 @@
 import { tool } from '@opencode-ai/plugin';
 import { availableModelIDsForProvider, addModelToProviderCatalog, buildModelCatalogReport, canonicalModelID, fallbackSummaryByTier, getSelectionWarningNotes, inferTierFromModel, normalizeCustomModelEntry, normalizeProviderList, providerChainSummary, providerTierSummary, sameCustomModelKey } from './models.js';
-import { KNOWN_TIERS, MIN_CUSTOM_PATTERN_LENGTH } from './constants.js';
+import { KNOWN_TIERS, MIN_CUSTOM_ERROR_PATTERN_LENGTH } from './constants.js';
 import { runtimeSettings, getCustomModels } from './state.js';
 import { saveRuntimeSettings } from './settings.js';
 import { runManualFailover } from './failover.js';
+import { validateCustomPattern } from './detection.js';
 import { buildStatusReport } from './reporting.js';
 
 /** createTools does build MCP tool definitions bound to plugin runtime context. */
@@ -245,6 +246,88 @@ export function createTools(ctx: any, settingsPath: string) {
         });
       },
     }),
+    failover_set_error_patterns: tool({
+      description: 'Set custom error message substring patterns that trigger failover for a provider.',
+      args: {
+        provider: tool.schema
+          .enum(['amazon-bedrock', 'openai', 'anthropic'])
+          .describe('Provider to configure patterns for'),
+        patterns: tool.schema
+          .array(tool.schema.string().min(1))
+          .min(1)
+          .describe(`Substring/wildcard patterns to match in error messages (case-insensitive, min ${MIN_CUSTOM_ERROR_PATTERN_LENGTH} non-wildcard chars)`),
+        replace: tool.schema
+          .boolean()
+          .optional()
+          .describe('If true, replace existing patterns. If false (default), append to existing patterns.'),
+      },
+      async execute(args) {
+        const providerID = args.provider;
+        const normalized = args.patterns
+          .map((p: string) => p.trim().toLowerCase())
+          .filter((p: string) => p.length > 0);
+        if (normalized.length === 0) {
+          return 'No valid patterns provided.';
+        }
+
+        const accepted: string[] = [];
+        const rejected: string[] = [];
+        for (const pattern of normalized) {
+          const validation = validateCustomPattern(pattern);
+          if (validation.valid) {
+            accepted.push(pattern);
+          } else {
+            rejected.push(`"${pattern}": ${validation.reason}`);
+          }
+        }
+
+        if (accepted.length === 0) {
+          return [
+            'All patterns were rejected.',
+            ...rejected.map((entry) => `  - ${entry}`),
+          ].join('\n');
+        }
+
+        const existing = runtimeSettings.customFailoverPatterns[providerID] ?? [];
+        const merged = args.replace
+          ? [...new Set(accepted)]
+          : [...new Set([...existing, ...accepted])];
+        runtimeSettings.customFailoverPatterns[providerID] = merged;
+        await saveRuntimeSettings(settingsPath).catch(() => {});
+
+        const lines = [
+          `Custom failover patterns updated for ${providerID}.`,
+          `Active patterns (${merged.length}):`,
+          ...merged.map((p: string, i: number) => `  ${i + 1}. "${p}"`),
+        ];
+        if (rejected.length > 0) {
+          lines.push('', `Rejected patterns (${rejected.length}):`, ...rejected.map((entry) => `  - ${entry}`));
+        }
+        return lines.join('\n');
+      },
+    }),
+    failover_clear_error_patterns: tool({
+      description: 'Clear custom error message patterns for a provider, or all providers.',
+      args: {
+        provider: tool.schema
+          .enum(['amazon-bedrock', 'openai', 'anthropic'])
+          .optional()
+          .describe('Provider to clear. If omitted, clears all providers.'),
+      },
+      async execute(args) {
+        if (args.provider) {
+          const hadPatterns = (runtimeSettings.customFailoverPatterns[args.provider] ?? []).length > 0;
+          runtimeSettings.customFailoverPatterns[args.provider] = [];
+          await saveRuntimeSettings(settingsPath).catch(() => {});
+          return hadPatterns
+            ? `Custom failover patterns cleared for ${args.provider}.`
+            : `No custom failover patterns were set for ${args.provider}.`;
+        }
+        runtimeSettings.customFailoverPatterns = {};
+        await saveRuntimeSettings(settingsPath).catch(() => {});
+        return 'All custom failover patterns cleared.';
+      },
+    }),
     failover_add_error_pattern: tool({
       description: 'Add one custom error pattern for a provider. Supports wildcard * matching.',
       args: {
@@ -254,13 +337,14 @@ export function createTools(ctx: any, settingsPath: string) {
         pattern: tool.schema
           .string()
           .min(1)
-          .describe(`Error substring or wildcard pattern (min ${MIN_CUSTOM_PATTERN_LENGTH} chars)`),
+          .describe(`Error substring or wildcard pattern (min ${MIN_CUSTOM_ERROR_PATTERN_LENGTH} non-wildcard chars)`),
       },
       async execute(args) {
         const providerID = args.provider;
         const normalized = args.pattern.trim().toLowerCase();
-        if (normalized.length < MIN_CUSTOM_PATTERN_LENGTH) {
-          return `Pattern too short (${normalized.length}). Minimum length is ${MIN_CUSTOM_PATTERN_LENGTH}.`;
+        const validation = validateCustomPattern(normalized);
+        if (!validation.valid) {
+          return `Pattern rejected: ${validation.reason}`;
         }
 
         const existing = runtimeSettings.customFailoverPatterns[providerID] ?? [];
@@ -330,7 +414,9 @@ export function createTools(ctx: any, settingsPath: string) {
         }
 
         if (lines.length === 0) {
-          return 'No custom failover error patterns configured.';
+          return args.provider
+            ? `No custom failover error patterns configured for ${args.provider}.`
+            : 'No custom failover error patterns configured.';
         }
         return ['Custom failover error patterns:', ...lines].join('\n');
       },
