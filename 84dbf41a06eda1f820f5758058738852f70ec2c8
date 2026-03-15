@@ -1,0 +1,329 @@
+src/tools.ts
+  ff8a143d466928e0 346
+  a3515d9ff9fc2cc8 3
+  0dafecdea030cc83 260
+src/handlers.ts
+  323a4de9c03b8733 144,212-214
+  0a1c39c361dc1e1f 272
+index.js
+  c7d2be10e11a840b 10
+  f316c264296aa5c1 12
+  90516e1e7b61abf7 13
+src/detection.ts
+  d0b903f6ab9e0519 420-421
+  323a4de9c03b8733 7
+  e4edbcba9e8462a2 270-276,282,287,307,309,317
+  e376d6c64355820e 2
+  1474f67141bd53d4 304,308
+src/index.ts
+  e376d6c64355820e 22
+  0b5adb8103c9666a 9
+src/constants.ts
+  c52ec9901b1b6030 50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.12",
+  "base_commit_sha": "84dbf41a06eda1f820f5758058738852f70ec2c8",
+  "prompts": {
+    "0774b4ab8afed6be": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310ee5f77ffeAC4LuguQWqexJJ-7319f891-b1e4-4566-8cde-ad60de2bfcea",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 3,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "0a1c39c361dc1e1f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e44fc4ffeXxH3FHg5paM4Qn-64f1d1de-8ea1-4abf-a8f4-c01834c09cce",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "0b5adb8103c9666a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e44fc4ffeXxH3FHg5paM4Qn-993d2748-2fec-4268-84a5-577d5ed3c846",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "0dafecdea030cc83": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310c51c35ffejUY33vjnlcVVf0-708cf2f2-e54c-4ab0-96fb-ffb584fc7fcc",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "1474f67141bd53d4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e458a1ffegrqdybhAs2wwvZ-d1529595-7077-424a-8de4-e7cf256fd4a6",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 7,
+      "total_deletions": 5,
+      "accepted_lines": 5,
+      "overriden_lines": 0
+    },
+    "2192e8282657990a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e458a1ffegrqdybhAs2wwvZ-37eff617-b66c-4b0c-97fd-61d32d830caf",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "323a4de9c03b8733": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e458a1ffegrqdybhAs2wwvZ-37c1eb8f-b877-43cf-9043-a7eebd09a0b2",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 2,
+      "accepted_lines": 5,
+      "overriden_lines": 0
+    },
+    "42ec12cf1c7a6230": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e44fc4ffeXxH3FHg5paM4Qn-05a9ace7-f49d-4832-af6e-73a80f9e5871",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "77f6f3ffe2decaa0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310c51c35ffejUY33vjnlcVVf0-4dbc9329-c10d-4996-b316-919696c19584",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "90516e1e7b61abf7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e458a1ffegrqdybhAs2wwvZ-d6b9ee47-6d25-4ae9-bd39-e5b8f631f034",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "a3515d9ff9fc2cc8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310c51c35ffejUY33vjnlcVVf0-3c00dcea-c52d-4698-a7a0-3c1e1f8bb93f",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "a82997d633a4566c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e458a1ffegrqdybhAs2wwvZ-4b7f22b5-cbae-44bf-8f20-ffa7644b43f4",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "b01d454414f3c2ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310c51c35ffejUY33vjnlcVVf0-9d747b0a-5ff8-4a1a-a133-afb49f0df12c",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "c52ec9901b1b6030": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310c75bd0ffeHNzH5poOjdOCZm-335db801-fd51-4c2a-8d75-8f5c5042a777",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 20,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "c7d2be10e11a840b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e44fc4ffeXxH3FHg5paM4Qn-016f7c12-60e3-4d4b-8786-ecdaaf6907f4",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 13,
+      "total_deletions": 25,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "c98e610b27cc7c29": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e44fc4ffeXxH3FHg5paM4Qn-db8db61a-1613-49f6-a4db-99d40804e5fb",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "cc1f19deeaeb68a4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e44fc4ffeXxH3FHg5paM4Qn-b790c3ad-c96f-43b2-a11e-423795a2e128",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 3,
+      "total_deletions": 1,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "d0b903f6ab9e0519": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310d75d5cffeZvMDqlvE3EgcLm-c20d2046-9f29-40de-8864-2bd39d169f61",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 5,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "d7f43d6716530e7d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e458a1ffegrqdybhAs2wwvZ-ffbc89d7-b618-4587-9c07-014e4c18b9ac",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 1,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "e376d6c64355820e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310e44fc4ffeXxH3FHg5paM4Qn-ad062d4b-b70a-4bac-b6cc-62152661dc51",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "e4edbcba9e8462a2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310f9c04fffeFpFr6B6OKoNAfy-cb8ed9ce-ba0b-4c1c-ad83-8b420b0384f2",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 18,
+      "total_deletions": 8,
+      "accepted_lines": 12,
+      "overriden_lines": 0
+    },
+    "f316c264296aa5c1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_310c51c35ffejUY33vjnlcVVf0-b106bdee-78c9-48d7-8417-d56741f56941",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "ff8a143d466928e0": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_310c51c35ffejUY33vjnlcVVf0",
+        "model": "anthropic/claude-opus-4-6"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
