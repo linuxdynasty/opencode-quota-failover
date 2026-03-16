@@ -246,6 +246,27 @@ export function isProviderRequestError(error: unknown): boolean {
   return requestErrorSignals.some((signal) => text.includes(signal));
 }
 
+/** isAnthropicTokenRefreshError does detect Anthropic token refresh 400 failures that should fail over. */
+function isAnthropicTokenRefreshError(
+  error: unknown,
+  failedModel: ProviderModel | null | undefined,
+): boolean {
+  if (failedModel?.providerID !== 'anthropic') {
+    return false;
+  }
+
+  const { text, statusCode } = collectErrorDetails(error);
+  if (!text) {
+    return false;
+  }
+
+  if (typeof statusCode === 'number' && statusCode !== 400) {
+    return false;
+  }
+
+  return /token refresh failed:\s*400\b/.test(text);
+}
+
 /**
  * matchesWildcardPattern checks if text contains the pattern using glob-style '*' wildcards.
  * Without '*', this is a plain substring match (text.includes(pattern)).
@@ -438,6 +459,10 @@ export function shouldTriggerFailover(
   }
 
   if (isBedrockModel(failedModel) && isProviderRequestError(error)) {
+    return true;
+  }
+
+  if (isAnthropicTokenRefreshError(error, failedModel)) {
     return true;
   }
 

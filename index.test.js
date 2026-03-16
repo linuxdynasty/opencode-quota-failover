@@ -1994,6 +1994,135 @@ describe("opencode-quota-failover", () => {
     });
   });
 
+  describe("shouldTriggerFailover - Anthropic token refresh failures", () => {
+    const anthropicSonnet = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+    const openaiSonnet = { providerID: "openai", modelID: "gpt-5.3-codex" };
+    const tokenRefreshFailedError = { message: "Error: Token refresh failed: 400" };
+
+    test("returns true for Anthropic token refresh 400 failures", () => {
+      expect(shouldTriggerFailover(tokenRefreshFailedError, anthropicSonnet, { requireDefinitive: true })).toBe(true);
+    });
+
+    test("returns false for non-Anthropic token refresh 400 failures", () => {
+      expect(shouldTriggerFailover(tokenRefreshFailedError, openaiSonnet, { requireDefinitive: true })).toBe(false);
+    });
+
+    test("returns false for null model on token refresh 400 failures", () => {
+      expect(shouldTriggerFailover(tokenRefreshFailedError, null, { requireDefinitive: true })).toBe(false);
+    });
+
+    test("returns false for larger numeric codes that only contain 400 as a prefix", () => {
+      expect(shouldTriggerFailover(
+        { message: "Error: Token refresh failed: 4000" },
+        anthropicSonnet,
+        { requireDefinitive: true }
+      )).toBe(false);
+    });
+
+    test("returns false when structured statusCode is present and not 400", () => {
+      expect(shouldTriggerFailover(
+        {
+          message: "Error: Token refresh failed: 400",
+          data: { statusCode: 401 }
+        },
+        anthropicSonnet,
+        { requireDefinitive: true }
+      )).toBe(false);
+    });
+  });
+
+  test("message.updated triggers failover for Anthropic token refresh 400 error", async () => {
+    const sessionID = "s-anthropic-token-refresh-msg";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-anthropic-token-refresh-msg",
+          agent: "sisyphus",
+          providerID: "anthropic",
+          modelID: "claude-sonnet-4-6"
+        }),
+        makeAssistantErrorMessage(
+          sessionID,
+          "anthropic",
+          "claude-sonnet-4-6",
+          "Error: Token refresh failed: 400",
+          400
+        )
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: { info: messagesBySession[sessionID][1].info }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.model).toEqual({
+      providerID: "amazon-bedrock",
+      modelID: "us.anthropic.claude-sonnet-4-6"
+    });
+  });
+
+  test("session.error triggers failover for Anthropic token refresh 400 error", async () => {
+    const sessionID = "s-anthropic-token-refresh-se";
+    const messagesBySession = {
+      [sessionID]: [
+        makeUserMessage(sessionID, {
+          id: "u-anthropic-token-refresh-se",
+          providerID: "anthropic",
+          modelID: "claude-sonnet-4-6"
+        })
+      ]
+    };
+    const { ctx, promptCalls } = createContext(messagesBySession);
+    const hooks = await quotaFailoverPlugin(ctx);
+
+    await hooks.event({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "a-stats-anthropic-token-refresh-se",
+            sessionID,
+            role: "assistant",
+            providerID: "anthropic",
+            modelID: "claude-sonnet-4-6",
+            tokens: { input: 1000, output: 0, reasoning: 0 }
+          }
+        }
+      }
+    });
+
+    await hooks.event({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID,
+          error: {
+            message: "Error: Token refresh failed: 400",
+            data: { statusCode: 400 }
+          }
+        }
+      }
+    });
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID } }
+    });
+
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0].body.model).toEqual({
+      providerID: "amazon-bedrock",
+      modelID: "us.anthropic.claude-sonnet-4-6"
+    });
+  });
+
   test("message.updated triggers failover for Bedrock invalid JSON body error", async () => {
     const sessionID = "s-bedrock-invalid-json-msg";
     const messagesBySession = {
