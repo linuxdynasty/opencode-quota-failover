@@ -1,0 +1,25 @@
+index.test.js
+  00a7e488b1ca0ae0 1997-2014
+src/detection.ts
+  00a7e488b1ca0ae0 249-265,461
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.12",
+  "base_commit_sha": "b6addb2c51aa81b32d8921b11887b37de28d16d9",
+  "prompts": {
+    "00a7e488b1ca0ae0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019cf45e-e662-7c82-b94f-97e1f8dd2e29",
+        "model": "gpt-5.4"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 39,
+      "total_deletions": 0,
+      "accepted_lines": 39,
+      "overriden_lines": 0
+    }
+  }
+}
