@@ -1,0 +1,220 @@
+index.test.js
+  00a7e488b1ca0ae0 1997-2014
+src/detection.ts
+  00a7e488b1ca0ae0 249-265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.12",
+  "base_commit_sha": "07a824412da00eff4ea844ddbff55545d1c62944",
+  "prompts": {
+    "00a7e488b1ca0ae0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019cf45e-e662-7c82-b94f-97e1f8dd2e29",
+        "model": "gpt-5.4"
+      },
+      "human_author": "Allen Sanabria <asanabria6910@gmail.com>",
+      "messages": [],
+      "total_additions": 39,
+      "total_deletions": 0,
+      "accepted_lines": 39,
+      "overriden_lines": 0
+    },
+    "23f4d97cb958101d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-87bc9251-8490-4873-9cd6-6fa4d2c0fcfa",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "2a8002e3dddab2ac": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_313bf42abffer22khXMTe9LJjA-0376f469-7404-497f-80c2-dce084bab990",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "2b6f26c7215aa461": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_3136bbf8bffehbN5YQhlItn9A8-e07e3be4-6250-44f0-b1fd-07ff1a9a4781",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 258,
+      "total_deletions": 0,
+      "accepted_lines": 257,
+      "overriden_lines": 0
+    },
+    "43c64f4c18a8c8c0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_313601453ffeGgTQQJOnOIto2H-ac6db6b7-7487-4383-9137-fac7448d334c",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 331,
+      "total_deletions": 0,
+      "accepted_lines": 331,
+      "overriden_lines": 0
+    },
+    "7283132dca7339c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-34a6ced0-80cd-4fb8-abc1-44f84582c3fb",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "736426dcfe296a1c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-acec6c4f-272a-4159-a88d-0eeb906f3ed3",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "8e471e080ae45542": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-d1655ccd-5ad4-4f6b-a4c6-970973c60cd1",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "97fc91efbdef2ba2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-5479b3a4-c231-4f2d-a3e6-43b5b4bb0aa7",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "9b46f9b5f7899084": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-532c35ac-bdbf-4485-b5b7-00e0a364d797",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "ae8d692e9f2fc122": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_3136bbf8bffehbN5YQhlItn9A8-e4351798-3994-4fcd-9c95-68ff84f6ebb5",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "b4e3057988ecac48": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-d95fa455-18de-4e6b-b3f5-f46f2278ae3f",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "c0fca9b0e45e5b69": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_313bf42abffer22khXMTe9LJjA-d1d1a7c3-9f6b-4194-83ad-11df080fa477",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 232,
+      "total_deletions": 0,
+      "accepted_lines": 230,
+      "overriden_lines": 0
+    },
+    "c9902192082da296": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-d6a0faca-4c26-4345-92e4-a377e10c6905",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "f84ed5c9ed6e6f4c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_3136bbf8bffehbN5YQhlItn9A8-083b8d20-f872-4961-9fc3-93506b8d5942",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "f86bd3cc6f045355": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "opencode-transcript-ses_31338af0dffeuqn9NeA56ZhgvR-3b908a25-3f76-44ae-b608-a8d8413a0f2d",
+        "model": "unknown"
+      },
+      "human_author": "Allen Sanabria <allen.sanabria@boats.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
